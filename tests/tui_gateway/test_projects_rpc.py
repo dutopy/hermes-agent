@@ -340,6 +340,116 @@ def test_disabled_discovery_clears_cache_and_rejects_new_scan(monkeypatch, tmp_p
     assert any(item["root"] == str(session_repo) for item in result["repos"])
 
 
+# ── params.profile scoping (app-global remote mode) ─────────────────────────
+# Mirrors session.*'s params.profile scoping (test_session_list_honors_params_
+# profile_opens_profile_db in tests/test_tui_gateway_server.py): the desktop's
+# "Remote gateway" mode points every profile at ONE shared backend process, so
+# projects.* handlers must read/write the profile named in params['profile'],
+# not always the launch profile's own projects.db/state.db.
+
+
+class _EmptySessionDB:
+    """Minimal SessionDB stand-in: no sessions, so build_tree only exercises
+    the projects.db half of the scoping (still real sqlite via projects_db)."""
+
+    def __init__(self, db_path=None):
+        self.db_path = db_path
+
+    def list_sessions_rich(self, **kwargs):
+        return []
+
+    def distinct_session_cwds(self):
+        return []
+
+    def backfill_repo_roots(self, mapping):
+        pass
+
+
+def test_projects_list_honors_params_profile_uses_separate_db(monkeypatch, tmp_path):
+    """projects.list must read the requested profile's own projects.db, not the
+    launch profile's — mirrors session.list's params.profile scoping (#62503-style
+    gap, but for projects.*, which never got the fix session.* did)."""
+    _call("projects.create", {"name": "Launch Project", "folders": [str(tmp_path / "launch")]})
+
+    other_home = tmp_path / "profiles" / "other"
+    other_home.mkdir(parents=True)
+    monkeypatch.setattr(server, "_profile_home", lambda p: other_home if p == "other" else None)
+
+    from hermes_cli import projects_db as pdb
+
+    with pdb.connect_closing(db_path=other_home / "projects.db") as conn:
+        pdb.create_project(conn, name="Other Project", folders=[str(tmp_path / "other")])
+
+    launch_listing = _call("projects.list")
+    other_listing = _call("projects.list", {"profile": "other"})
+
+    launch_names = {p["name"] for p in launch_listing["projects"]}
+    other_names = {p["name"] for p in other_listing["projects"]}
+
+    assert launch_names == {"Launch Project"}
+    assert other_names == {"Other Project"}
+    assert launch_names != other_names
+
+
+def test_projects_create_honors_params_profile_writes_separate_db(monkeypatch, tmp_path):
+    """A projects.create with params.profile must write the NAMED profile's
+    projects.db, not the launch profile's — the write side of the same gap."""
+    other_home = tmp_path / "profiles" / "writer"
+    other_home.mkdir(parents=True)
+    monkeypatch.setattr(server, "_profile_home", lambda p: other_home if p == "writer" else None)
+
+    _call("projects.create", {"name": "Writer Project", "folders": [str(tmp_path / "w")], "profile": "writer"})
+
+    # The launch profile's own projects.db must NOT have gained this project.
+    launch_listing = _call("projects.list")
+    assert launch_listing["projects"] == []
+
+    from hermes_cli import projects_db as pdb
+
+    with pdb.connect_closing(db_path=other_home / "projects.db") as conn:
+        names = {p.name for p in pdb.list_projects(conn)}
+    assert names == {"Writer Project"}
+
+
+def test_projects_tree_honors_params_profile_uses_separate_db(monkeypatch, tmp_path):
+    """projects.tree (the desktop sidebar's authoritative read) must scope to
+    params.profile end-to-end: both the state.db (session rows, stubbed here to
+    isolate the projects.db half) and the projects.db reads."""
+    _call("projects.create", {"name": "Launch Project", "folders": [str(tmp_path / "launch")]})
+
+    other_home = tmp_path / "profiles" / "mlperf"
+    other_home.mkdir(parents=True)
+    (other_home / "state.db").write_bytes(b"")
+    monkeypatch.setattr(server, "_profile_home", lambda p: other_home if p == "mlperf" else None)
+    monkeypatch.setattr(server, "_get_db", lambda: _EmptySessionDB())
+    monkeypatch.setattr("hermes_state.SessionDB", _EmptySessionDB)
+
+    from hermes_cli import projects_db as pdb
+
+    with pdb.connect_closing(db_path=other_home / "projects.db") as conn:
+        pdb.create_project(conn, name="Other Project", folders=[str(tmp_path / "other")])
+
+    launch_tree = _call("projects.tree")
+    other_tree = _call("projects.tree", {"profile": "mlperf"})
+
+    launch_labels = {p["label"] for p in launch_tree["projects"]}
+    other_labels = {p["label"] for p in other_tree["projects"]}
+
+    assert launch_labels == {"Launch Project"}
+    assert other_labels == {"Other Project"}
+    assert launch_labels != other_labels
+
+
+def test_projects_tree_without_profile_still_defaults_to_launch(tmp_path):
+    """Backward compatibility: an older desktop build that never sends
+    params.profile must keep seeing its own (launch) profile's projects,
+    unchanged by the fix."""
+    _call("projects.create", {"name": "Only Project", "folders": [str(tmp_path)]})
+
+    tree = _call("projects.tree")
+    assert {p["label"] for p in tree["projects"]} == {"Only Project"}
+
+
 def test_nondefault_policy_rejects_stale_or_legacy_results(monkeypatch, tmp_path):
     root = tmp_path / "allowed"
     root.mkdir()

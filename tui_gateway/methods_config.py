@@ -18,25 +18,30 @@ _profile_scoped = _registry.profile_scoped
 
 @method("projects.discover_repos")
 def _(rid, params: dict) -> dict:
-    """Repos for the desktop overview: scanned-from-disk (cached) ∪ session-derived."""
-    try:
-        db = _get_db()
-        if db is None:
-            return _ok(rid, {"repos": []})
-        from hermes_cli import projects_db as pdb
+    """Repos for the desktop overview: scanned-from-disk (cached) ∪ session-derived.
 
-        policy = _repo_discovery_policy()
-        policy_key = _repo_discovery_policy_key(policy)
-        with pdb.connect_closing() as conn:
-            pdb.reconcile_discovered_repos_policy(
-                conn,
-                policy_key,
-                preserve_unversioned=_repo_discovery_policy_is_default(policy),
-            )
-            repos = _discover_repos_payload(
-                db, conn=conn, include_cached=policy["enabled"]
-            )
-        return _ok(rid, {"repos": repos, "discovery_policy": policy})
+    Honors ``params.profile`` (app-global remote mode) so both the session-db
+    read and the projects.db read resolve to the focused profile, not just the
+    launch profile — mirrors ``session.*``'s ``_profile_db``/``_profile_scoped``.
+    """
+    try:
+        with _profile_db(params) as db:
+            if db is None:
+                return _ok(rid, {"repos": []})
+            from hermes_cli import projects_db as pdb
+
+            policy = _repo_discovery_policy()
+            policy_key = _repo_discovery_policy_key(policy)
+            with _profile_projects_db(params) as conn:
+                pdb.reconcile_discovered_repos_policy(
+                    conn,
+                    policy_key,
+                    preserve_unversioned=_repo_discovery_policy_is_default(policy),
+                )
+                repos = _discover_repos_payload(
+                    db, conn=conn, include_cached=policy["enabled"], params=params
+                )
+            return _ok(rid, {"repos": repos, "discovery_policy": policy})
     except Exception as e:
         return _err(rid, 5061, str(e))
 
@@ -45,7 +50,12 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Persist git repo roots found by the client's filesystem scan, then return
     the merged repo list. The native crawl runs on the desktop (local fs); this
-    caches the result so later reads are instant instead of re-walking disk."""
+    caches the result so later reads are instant instead of re-walking disk.
+
+    Honors ``params.profile`` (app-global remote mode) so the write and the
+    merged read both land on the focused profile's ``projects.db``/``state.db``
+    — mirrors ``session.*``'s ``_profile_db``/``_profile_scoped``.
+    """
     try:
         from hermes_cli import projects_db as pdb
 
@@ -72,7 +82,7 @@ def _(rid, params: dict) -> dict:
             elif isinstance(item, dict) and item.get("root"):
                 pairs.append((str(item["root"]), item.get("label")))
 
-        with pdb.connect_closing() as conn:
+        with _profile_projects_db(params) as conn:
             pdb.reconcile_discovered_repos_policy(
                 conn,
                 policy_key,
@@ -88,19 +98,19 @@ def _(rid, params: dict) -> dict:
             elif not policy["enabled"]:
                 pdb.clear_discovered_repos(conn, policy_key=policy_key)
 
-        db = _get_db()
-        return _ok(
-            rid,
-            {
-                "repos": _discover_repos_payload(
-                    db, include_cached=policy["enabled"]
-                )
-                if db is not None
-                else [],
-                "accepted": accepted,
-                "discovery_policy": policy,
-            },
-        )
+        with _profile_db(params) as db:
+            return _ok(
+                rid,
+                {
+                    "repos": _discover_repos_payload(
+                        db, include_cached=policy["enabled"], params=params
+                    )
+                    if db is not None
+                    else [],
+                    "accepted": accepted,
+                    "discovery_policy": policy,
+                },
+            )
     except Exception as e:
         return _err(rid, 5061, str(e))
 
@@ -111,23 +121,33 @@ def _(rid, params: dict) -> dict:
     counts + a few preview sessions per project, plus the flat set of session
     ids claimed by any project (so the desktop excludes them from flat Recents).
     Lanes carry no session rows here; drill-in uses ``projects.project_sessions``.
+
+    Honors ``params.profile`` (app-global remote mode) so the desktop's Projects
+    sidebar reads the focused profile's ``state.db``/``projects.db`` instead of
+    always the launch profile's — mirrors ``session.*``'s
+    ``_profile_db``/``_profile_scoped``.
     """
     try:
-        db = _get_db()
-        if db is None:
-            return _ok(rid, {"projects": [], "active_id": None, "scoped_session_ids": []})
+        with _profile_db(params) as db:
+            if db is None:
+                return _ok(rid, {"projects": [], "active_id": None, "scoped_session_ids": []})
 
-        tree, active_id = _build_project_tree(
-            db,
-            preview_limit=int(params.get("preview_limit") or 3),
-            hydrate=False,
-            session_limit=int(params.get("session_limit") or 2000),
-            include_discovered=True,
-        )
-        return _ok(
-            rid,
-            {"projects": tree["projects"], "active_id": active_id, "scoped_session_ids": tree["scoped_session_ids"]},
-        )
+            tree, active_id = _build_project_tree(
+                db,
+                preview_limit=int(params.get("preview_limit") or 3),
+                hydrate=False,
+                session_limit=int(params.get("session_limit") or 2000),
+                include_discovered=True,
+                params=params,
+            )
+            return _ok(
+                rid,
+                {
+                    "projects": tree["projects"],
+                    "active_id": active_id,
+                    "scoped_session_ids": tree["scoped_session_ids"],
+                },
+            )
     except Exception as e:
         return _err(rid, 5061, str(e))
 
@@ -136,24 +156,32 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Fully hydrated lanes (repo -> lane -> session rows) for one project,
     built from the same authoritative grouping as ``projects.tree`` so ids and
-    membership match exactly. Used when the user enters a project."""
+    membership match exactly. Used when the user enters a project.
+
+    Honors ``params.profile`` (app-global remote mode) — mirrors
+    ``projects.tree``.
+    """
     try:
         project_id = str(params.get("project_id") or "")
         if not project_id:
             return _err(rid, 5063, "project_id required")
 
-        db = _get_db()
-        if db is None:
-            return _ok(rid, {"project": None})
+        with _profile_db(params) as db:
+            if db is None:
+                return _ok(rid, {"project": None})
 
-        # Drill-in only needs the entered project (which has sessions), so skip
-        # the zero-session discovery tier entirely.
-        tree, _active = _build_project_tree(
-            db, preview_limit=0, hydrate=True, session_limit=int(params.get("session_limit") or 5000),
-            include_discovered=False,
-        )
-        proj = next((p for p in tree["projects"] if p["id"] == project_id), None)
-        return _ok(rid, {"project": proj})
+            # Drill-in only needs the entered project (which has sessions), so
+            # skip the zero-session discovery tier entirely.
+            tree, _active = _build_project_tree(
+                db,
+                preview_limit=0,
+                hydrate=True,
+                session_limit=int(params.get("session_limit") or 5000),
+                include_discovered=False,
+                params=params,
+            )
+            proj = next((p for p in tree["projects"] if p["id"] == project_id), None)
+            return _ok(rid, {"project": proj})
     except Exception as e:
         return _err(rid, 5061, str(e))
 

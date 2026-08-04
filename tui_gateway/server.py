@@ -1361,6 +1361,29 @@ def _profile_db(params: dict | None = None):
                 db.close()
 
 
+@contextlib.contextmanager
+def _profile_projects_db(params: dict | None = None):
+    """Yield an open projects.db connection for ``params['profile']`` (app-global
+    remote mode).
+
+    Mirrors :func:`_profile_db` for ``state.db``: launch/own profile → the
+    default ``projects.db`` (``pdb.connect_closing()`` resolving via
+    ``get_hermes_home()``); a named non-launch profile → that profile's own
+    ``projects.db`` under its own ``HERMES_HOME``. Without this, every
+    ``projects.*`` RPC in app-global remote mode always read/wrote the launch
+    profile's ``projects.db`` no matter which profile the desktop had focused.
+    """
+    from hermes_cli import projects_db as pdb
+
+    profile = None
+    if isinstance(params, dict):
+        profile = (params.get("profile") or "").strip() or None
+    home = _profile_home(profile)
+    db_path = (home / "projects.db") if home is not None else None
+    with pdb.connect_closing(db_path=db_path) as conn:
+        yield conn
+
+
 def _response_profile_name(profile: str | None = None) -> str:
     """Profile name to report on session.* payloads.
 
@@ -11200,7 +11223,7 @@ def _projects_method(name: str):
             try:
                 from hermes_cli import projects_db as pdb
 
-                with pdb.connect_closing() as conn:
+                with _profile_projects_db(params) as conn:
                     return fn(rid, params, pdb, conn)
             except _NoProject:
                 return _err(rid, _E_NO_PROJECT, "no such project")
@@ -11414,7 +11437,7 @@ def _repo_discovery_policy_is_default(policy: dict) -> bool:
 
 
 def _discover_repos_payload(
-    db, *, conn=None, backfill: bool = True, include_cached: bool = True
+    db, *, conn=None, backfill: bool = True, include_cached: bool = True, params: dict | None = None
 ) -> list[dict]:
     """Merge filesystem-scanned repos (cached) with session-derived repo roots.
 
@@ -11426,7 +11449,10 @@ def _discover_repos_payload(
     ``conn`` reuses an already-open projects.db connection (the tree path holds
     one); ``backfill`` persists resolved roots back onto session rows — kept off
     the per-turn tree path (grouping uses the live git resolver regardless) and
-    done only on the explicit discover/record refresh.
+    done only on the explicit discover/record refresh. ``params`` (the RPC's
+    params dict) scopes the fallback short-lived connection to the requested
+    profile's ``projects.db`` when ``conn`` isn't already supplied — see
+    :func:`_profile_projects_db`.
     """
     _is_junk = _is_repo_junk
     repos: dict[str, dict] = {}
@@ -11492,7 +11518,7 @@ def _discover_repos_payload(
         if conn is not None:
             _read(conn)
         else:
-            with pdb.connect_closing() as own:
+            with _profile_projects_db(params) as own:
                 _read(own)
     except Exception:
         logger.debug("failed to read discovered repo cache", exc_info=True)
@@ -11544,14 +11570,18 @@ def _project_tree_row(r: dict) -> dict:
 
 
 def _project_tree_inputs(
-    db, session_limit: int, *, include_discovered: bool
+    db, session_limit: int, *, include_discovered: bool, params: dict | None = None
 ) -> tuple[list[dict], list[dict], list[dict], str | None]:
     """Gather (sessions, projects, discovered_repos, active_id) for build_tree.
 
     ``include_discovered`` is the zero-session-repo overview tier; the entered
     view (drill-in) skips it entirely — it only needs the project it's showing,
     which already has sessions — avoiding the distinct-cwd scan + git probes on
-    that per-turn path. One projects.db connection serves both reads.
+    that per-turn path. One projects.db connection serves both reads. ``params``
+    (the RPC's params dict) scopes that connection to ``params['profile']`` in
+    app-global remote mode — see :func:`_profile_projects_db``; ``db`` (the
+    SessionDB for session rows) is likewise expected to already be the
+    profile-scoped handle from :func:`_profile_db`.
     """
     rows = db.list_sessions_rich(
         limit=session_limit,
@@ -11572,7 +11602,7 @@ def _project_tree_inputs(
 
     policy = _repo_discovery_policy()
     policy_key = _repo_discovery_policy_key(policy)
-    with pdb.connect_closing() as conn:
+    with _profile_projects_db(params) as conn:
         if include_discovered:
             pdb.reconcile_discovered_repos_policy(
                 conn,
@@ -11588,6 +11618,7 @@ def _project_tree_inputs(
                 conn=conn,
                 backfill=False,
                 include_cached=policy["enabled"],
+                params=params,
             )
             if include_discovered
             else []
@@ -11618,14 +11649,26 @@ def _dir_exists_cached(path: str) -> bool:
 
 
 def _build_project_tree(
-    db, *, preview_limit: int, hydrate: bool, session_limit: int, include_discovered: bool
+    db,
+    *,
+    preview_limit: int,
+    hydrate: bool,
+    session_limit: int,
+    include_discovered: bool,
+    params: dict | None = None,
 ) -> tuple[dict, str | None]:
-    """Gather inputs and run the one authoritative builder. Returns (tree, active_id)."""
+    """Gather inputs and run the one authoritative builder. Returns (tree, active_id).
+
+    ``params`` (the RPC's params dict) is forwarded to :func:`_project_tree_inputs`
+    so the projects.db read honors ``params['profile']`` in app-global remote
+    mode; ``db`` (session rows) should already be the profile-scoped
+    :func:`_profile_db` handle.
+    """
     from tui_gateway import project_tree
 
     _DIR_EXISTS_CACHE.clear()
     sessions, projects, discovered, active_id = _project_tree_inputs(
-        db, session_limit, include_discovered=include_discovered
+        db, session_limit, include_discovered=include_discovered, params=params
     )
     tree = project_tree.build_tree(
         projects,

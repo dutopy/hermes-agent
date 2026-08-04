@@ -409,6 +409,7 @@ describe('repository discovery policy', () => {
     expect(scanRepos).not.toHaveBeenCalled()
     expect(request).toHaveBeenCalledWith('projects.record_repos', {
       discovery_policy: { enabled: false, exclude_paths: [], roots: [] },
+      profile: 'default',
       repos: []
     })
   })
@@ -444,6 +445,7 @@ describe('repository discovery policy', () => {
         exclude_paths: ['/work/vendor'],
         roots: ['/work']
       },
+      profile: 'default',
       repos: [{ label: 'repo', root: '/work/repo' }]
     })
   })
@@ -457,6 +459,79 @@ describe('repository discovery policy', () => {
 
     expect(scanRepos).not.toHaveBeenCalled()
     expect(getHermesConfig).not.toHaveBeenCalled()
+  })
+})
+
+describe('projects.* RPC profile scoping (app-global remote mode)', () => {
+  // The server scopes every `projects.*` RPC by `params.profile` (mirrors the
+  // existing `session.*` mechanism) so a single shared "Remote gateway" backend
+  // serves each profile's OWN projects.db instead of always the launch
+  // profile's. The client's half of that contract is threading `profile` into
+  // every `projects.*` call — this proves it, rather than just that the code
+  // compiles.
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('sends the active gateway profile on projects.list', async () => {
+    const request = vi.fn().mockResolvedValue({ active_id: null, projects: [] })
+    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+    $activeGatewayProfile.set('mlperf')
+
+    await refreshProjects()
+
+    expect(request).toHaveBeenCalledWith('projects.list', { profile: 'mlperf' })
+  })
+
+  it('sends the active gateway profile on projects.tree', async () => {
+    const request = vi.fn().mockResolvedValue({ active_id: null, projects: [], scoped_session_ids: [] })
+    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+    gatewayAtom.set({ connectionState: 'open', request } as never)
+    $activeGatewayProfile.set('mlperf')
+
+    await refreshProjectTree()
+
+    expect(request).toHaveBeenCalledWith('projects.tree', { preview_limit: 3, profile: 'mlperf' })
+  })
+
+  it('sends different profiles for different active gateway profiles', async () => {
+    const requestA = vi.fn().mockResolvedValue({ active_id: null, projects: [], scoped_session_ids: [] })
+    const gatewayA = { connectionState: 'open', request: requestA }
+    activeGateway.mockReturnValue(gatewayA as never)
+    gatewayAtom.set(gatewayA as never)
+    $activeGatewayProfile.set('profile-a')
+    await refreshProjectTree()
+
+    const requestB = vi.fn().mockResolvedValue({ active_id: null, projects: [], scoped_session_ids: [] })
+    const gatewayB = { connectionState: 'open', request: requestB }
+    activeGateway.mockReturnValue(gatewayB as never)
+    gatewayAtom.set(gatewayB as never)
+    $activeGatewayProfile.set('profile-b')
+    await refreshProjectTree()
+
+    expect(requestA).toHaveBeenCalledWith('projects.tree', expect.objectContaining({ profile: 'profile-a' }))
+    expect(requestB).toHaveBeenCalledWith('projects.tree', expect.objectContaining({ profile: 'profile-b' }))
+  })
+
+  it('falls back to "default" when no gateway profile is active', async () => {
+    const request = vi.fn().mockResolvedValue({ active_id: null, projects: [] })
+    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+    $activeGatewayProfile.set('')
+
+    await refreshProjects()
+
+    expect(request).toHaveBeenCalledWith('projects.list', { profile: 'default' })
+  })
+
+  it('does not send profile on non-projects RPCs (e.g. llm.oneshot)', async () => {
+    const request = vi.fn().mockResolvedValue({ text: 'idea' })
+    activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
+    $activeGatewayProfile.set('mlperf')
+
+    const { generateProjectIdea } = await import('./projects')
+    await generateProjectIdea('Demo')
+
+    expect(request).toHaveBeenCalledWith('llm.oneshot', expect.not.objectContaining({ profile: expect.anything() }))
   })
 })
 

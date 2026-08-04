@@ -379,6 +379,23 @@ export async function followActiveSessionCwd(cwd: string): Promise<void> {
   }
 }
 
+// `projects.*` RPCs are profile-scoped server-side (mirrors `session.*`'s
+// `params.profile` handling): in "Remote gateway" mode a single backend serves
+// every profile over one socket, so each call must carry which profile it's
+// for. Every other RPC issued through this module's two request wrappers
+// below gets `profile` merged in automatically here — the single place that
+// knows the active gateway profile — instead of every call site duplicating
+// `$activeGatewayProfile.get() || 'default'` (same value `activeProjectsContext()`
+// computes for the callers that also need the gateway handle). An explicit
+// `profile` already in `params` (none today) always wins.
+function withProjectsProfile(method: string, params: Record<string, unknown>): Record<string, unknown> {
+  if (!method.startsWith('projects.') || 'profile' in params) {
+    return params
+  }
+
+  return { ...params, profile: $activeGatewayProfile.get() || 'default' }
+}
+
 // Issue a request on whichever gateway is currently active, reconnecting once
 // if the socket dropped. Projects are per-profile, so they intentionally follow
 // the active gateway just like the session list does.
@@ -393,7 +410,7 @@ async function gatewayRequest<T>(method: string, params: Record<string, unknown>
     throw new Error('Hermes gateway is not connected')
   }
 
-  return gateway.request<T>(method, params)
+  return gateway.request<T>(method, withProjectsProfile(method, params))
 }
 
 async function gatewayRequestOn<T>(
@@ -401,7 +418,7 @@ async function gatewayRequestOn<T>(
   method: string,
   params: Record<string, unknown> = {}
 ): Promise<T> {
-  return gateway.request<T>(method, params)
+  return gateway.request<T>(method, withProjectsProfile(method, params))
 }
 
 interface ActiveProjectsContext {
