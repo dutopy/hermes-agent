@@ -90,6 +90,31 @@ class TestFleetRestartTimeoutIsolation:
 
         assert seen == ["hermes-gateway-coder"]
 
+    def test_dashboard_units_are_included_alongside_gateway_units(self):
+        """Regression (2026-08-04): a Desktop app in "Remote gateway" mode
+        talks to ``hermes-dashboard.service``, a long-lived Python process
+        with the exact same stale-in-memory-code problem as a gateway after
+        ``hermes update`` — but it was never in this restart sweep, so a
+        remote-connected Desktop client kept showing the pre-update backend
+        version forever, confirmed live."""
+        seen: list[str] = []
+
+        _for_each_systemd_gateway_unit(
+            "\n".join(
+                [
+                    "ssh.service loaded active running",
+                    "hermes-gateway-coder.service loaded active running",
+                    "hermes-dashboard.service loaded active running",
+                    "not-a-service loaded active running",
+                    "",
+                ]
+            ),
+            process_unit=seen.append,
+            on_unit_timeout=lambda *_: pytest.fail("unexpected timeout"),
+        )
+
+        assert seen == ["hermes-gateway-coder", "hermes-dashboard"]
+
     def test_process_errors_other_than_timeout_still_propagate(self):
         def process_unit(_svc_name: str) -> None:
             raise RuntimeError("not a timeout")

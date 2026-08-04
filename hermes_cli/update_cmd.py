@@ -3254,7 +3254,8 @@ def _for_each_systemd_gateway_unit(
     process_unit,
     on_unit_timeout,
 ) -> None:
-    """Process each ``hermes-gateway*.service`` from ``systemctl list-units``.
+    """Process each ``hermes-gateway*.service``/``hermes-dashboard*.service``
+    from ``systemctl list-units``.
 
     ``subprocess.TimeoutExpired`` raised by ``process_unit`` is isolated to
     that unit via ``on_unit_timeout`` so one wedged systemctl call cannot
@@ -3268,8 +3269,8 @@ def _for_each_systemd_gateway_unit(
         if not unit.endswith(".service"):
             continue
         # list-units is already pattern-filtered, but keep the name gate so a
-        # stray non-gateway line cannot enter the restart path.
-        if not unit.startswith("hermes-gateway"):
+        # stray non-gateway/non-dashboard line cannot enter the restart path.
+        if not (unit.startswith("hermes-gateway") or unit.startswith("hermes-dashboard")):
             continue
         svc_name = unit.removesuffix(".service")
         try:
@@ -4902,6 +4903,19 @@ def _cmd_update_impl(args, gateway_mode: bool):
                             + [
                                 "list-units",
                                 "hermes-gateway*",
+                                # The dashboard backend (`hermes dashboard`,
+                                # unit `hermes-dashboard.service`) is what a
+                                # Desktop app in "Remote gateway" mode
+                                # actually talks to — it runs the exact same
+                                # long-lived Python process problem as a
+                                # gateway (old code stays loaded in memory
+                                # after `hermes update` touches the files on
+                                # disk) but was never in this restart sweep,
+                                # so remote-connected Desktop clients kept
+                                # showing a stale backend version after every
+                                # update until this unit was restarted by
+                                # hand (confirmed live 2026-08-04).
+                                "hermes-dashboard*",
                                 "--plain",
                                 "--no-legend",
                                 "--no-pager",
