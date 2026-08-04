@@ -83,6 +83,58 @@ def test_gui_installs_packages_and_launches_desktop_app(tmp_path, monkeypatch):
     assert mock_run.call_args_list[1].kwargs["cwd"] == desktop_dir
 
 
+def test_gui_npm_install_holds_node_modules_build_lock(tmp_path, monkeypatch):
+    """Regression: cmd_gui's npm install must serialize against a concurrent
+    _build_web_ui() (and hermes update's own node-deps refresh) via the shared
+    ``.web_ui_build.lock`` flock, or two unlocked installs racing the same
+    ``node_modules`` tree lose with ENOTEMPTY (confirmed live in
+    ~/.hermes/logs/desktop.log on 2026-08-03). Assert the lock is actually
+    held — not just that the code around the call compiles — by trying a
+    non-blocking acquisition of the same lock file from inside the mocked
+    install call and confirming it is rejected.
+    """
+    import fcntl
+
+    root = _make_desktop_tree(tmp_path)
+    desktop_dir = root / "apps" / "desktop"
+    monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
+    packaged_exe = _make_packaged_executable(root, monkeypatch)
+
+    install_ok = subprocess.CompletedProcess(["npm", "ci"], 0)
+    pack_ok = subprocess.CompletedProcess(["npm", "run", "pack"], 0)
+    launch_ok = subprocess.CompletedProcess([str(packaged_exe)], 0)
+
+    lock_path = root / ".web_ui_build.lock"
+    contention_seen = {"value": False}
+
+    def _fake_install(*a, **kw):
+        probe = open(lock_path, "a", encoding="utf-8")
+        try:
+            fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            contention_seen["value"] = True
+        else:
+            fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+        finally:
+            probe.close()
+        return install_ok
+
+    with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"), \
+         patch("hermes_cli.main._run_npm_install_deterministic", side_effect=_fake_install), \
+         patch("hermes_cli.main._desktop_build_needed", return_value=True), \
+         patch("hermes_cli.main._write_desktop_build_stamp"), \
+         patch("hermes_cli.main._desktop_macos_relaunchable_fixup"), \
+         patch("hermes_cli.main.subprocess.run", side_effect=[pack_ok, launch_ok]), \
+         pytest.raises(SystemExit):
+        cli_main.cmd_gui(_ns())
+
+    assert contention_seen["value"] is True, (
+        "cmd_gui's npm install ran without holding _node_modules_build_lock(): "
+        "a concurrent non-blocking flock attempt on .web_ui_build.lock "
+        "succeeded when it should have been rejected."
+    )
+
+
 def test_gui_install_env_prepends_managed_node_on_bare_path(tmp_path, monkeypatch):
     """Regression: npm's child scripts (electron-winstaller's select-7z-arch.js)
     shell out to bare ``node``. When Desktop is launched from the updater chain

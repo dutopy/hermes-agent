@@ -5062,6 +5062,7 @@ from hermes_cli.update_cmd import (  # noqa: F401
     _leftover_pausable_gateway_pids,
     _log_only_write,
     _mark_skip_upstream_prompt,
+    _node_modules_build_lock,
     _npm_bin_exists,
     _npm_lockfile_changed,
     _npm_manifest_paths,
@@ -7071,7 +7072,15 @@ def cmd_gui(args: argparse.Namespace):
             # NixOS build env keeps its PYTHON hint while restoring managed Node
             # ahead of a bare PATH (same idiom as the `hermes update` path).
             nixos_env = with_hermes_node_path(_nixos_build_env())
-            install_result = _run_npm_install_deterministic(npm, PROJECT_ROOT, capture_output=False, env=nixos_env)
+            # Serialize against a concurrent `_build_web_ui()` (and against
+            # `hermes update`'s own `_update_node_dependencies()`, which takes
+            # this same lock) — both mutate the shared PROJECT_ROOT/node_modules
+            # tree, and an unlocked install here races the desktop app's own
+            # backend-boot retry loop into ENOTEMPTY rename/rmdir errors
+            # (confirmed live in ~/.hermes/logs/desktop.log). See
+            # _node_modules_build_lock's docstring for the full failure mode.
+            with _node_modules_build_lock():
+                install_result = _run_npm_install_deterministic(npm, PROJECT_ROOT, capture_output=False, env=nixos_env)
             if install_result.returncode != 0:
                 if not _electron_pkg_staged_missing_dist(PROJECT_ROOT):
                     print("✗ Desktop dependency install failed")

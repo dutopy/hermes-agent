@@ -23,6 +23,7 @@ at import time (``_m()`` resolves lazily at call time, when main.py is fully
 loaded, so there is no import cycle).
 """
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -2031,12 +2032,58 @@ def _record_npm_lockfile_hash(hermes_root: Path) -> None:
     except OSError:
         logger.debug("Could not write npm lockfile hash cache")
 
+@contextlib.contextmanager
+def _node_modules_build_lock():
+    """Serialize root/workspace npm installs against ``_build_web_ui()``.
+
+    ``_build_web_ui()`` (hermes_cli/main.py) already takes an exclusive
+    flock on ``<repo>/.web_ui_build.lock`` before running its own
+    ``npm install --workspace web``, precisely to stop concurrent dashboard
+    boots from racing each other's writes to the shared ``node_modules``
+    tree. ``hermes update``'s own Node refresh in
+    :func:`_update_node_dependencies` runs a *different*, unlocked
+    ``npm install`` against the same tree (root install, then
+    ``--workspace ui-tui --workspace web``) — so when the desktop app's
+    backend-boot retry loop triggers a concurrent ``_build_web_ui()`` call
+    in another process while an in-app "Update" is running `hermes update`
+    as a child of the still-live Electron process, the two unlocked/locked
+    npm installs can rename/remove the same ``node_modules`` entries at the
+    same moment and lose the race with ``ENOTEMPTY`` (rmdir/rename errors),
+    confirmed live in ``~/.hermes/logs/desktop.log`` on 2026-08-03. Taking
+    the *same* lock here (blocking, not the builder's non-blocking
+    stale-dist-serving variant — an update must not skip its own install)
+    closes that window: whichever side gets there first finishes before the
+    other's npm process touches the tree.
+    """
+    try:
+        import fcntl
+    except ImportError:
+        # Windows: no flock available; _build_web_ui() itself falls back to
+        # running unserialized there too, so there is nothing to join.
+        yield
+        return
+    lock_path = _m().PROJECT_ROOT / ".web_ui_build.lock"
+    try:
+        lock_file = open(lock_path, "a", encoding="utf-8")
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        lock_file.close()
+
+
 def _update_node_dependencies() -> list[str]:
     """Refresh Node deps in the repo root and update workspaces.
 
     Returns the list of labels whose npm install failed (empty on success),
     so the caller can treat a Node refresh failure as a partial update rather
-    than silently reporting ``Update complete!`` (#30271).
+    than silently reporting ``Update complete!`` (#30271). The npm install
+    steps below run inside :func:`_node_modules_build_lock` to serialize
+    against a concurrently-running ``_build_web_ui()`` in another process
+    (see that function's docstring for the exact failure mode this closes).
     """
     if not (_m().PROJECT_ROOT / "package.json").exists():
         return []
@@ -2101,41 +2148,49 @@ def _update_node_dependencies() -> list[str]:
     # print download progress, and capturing it makes a long download look
     # hung. The chatty npm-deprecation noise during `hermes update` comes from
     # the *desktop* build, not this step; that one is captured to update.log.
-    root_args = [*extra_args, "--workspaces=false"]
-    root_result = _m()._run_npm_install_deterministic(
-        npm,
-        _m().PROJECT_ROOT,
-        extra_args=tuple(root_args),
-        capture_output=False,
-        env=nixos_env,
-    )
-    if root_result.returncode != 0:
-        print("  ⚠ npm install failed in repo root")
-        stderr = (root_result.stderr or "").strip() if root_result.stderr else ""
+    #
+    # Both steps below run under _node_modules_build_lock() so a concurrent
+    # _build_web_ui() (e.g. triggered by the desktop app's own backend-boot
+    # retry loop while this `hermes update` runs as a child of the still-live
+    # Electron process) cannot touch the same node_modules tree at the same
+    # time — see that helper's docstring for the confirmed ENOTEMPTY race.
+    with _node_modules_build_lock():
+        root_args = [*extra_args, "--workspaces=false"]
+        root_result = _m()._run_npm_install_deterministic(
+            npm,
+            _m().PROJECT_ROOT,
+            extra_args=tuple(root_args),
+            capture_output=False,
+            env=nixos_env,
+        )
+        if root_result.returncode != 0:
+            print("  ⚠ npm install failed in repo root")
+            stderr = (root_result.stderr or "").strip() if root_result.stderr else ""
+            if stderr:
+                print(f"    {stderr.splitlines()[-1]}")
+            return _partial_update_failure("repo root")
+
+        # Step 2: install only the workspaces update needs (ui-tui, web).
+        # --workspace selects specific workspaces; the rest (desktop) are
+        # skipped.
+        ws_args = [*extra_args, "--workspace", "ui-tui", "--workspace", "web"]
+        ws_result = _m()._run_npm_install_deterministic(
+            npm,
+            _m().PROJECT_ROOT,
+            extra_args=tuple(ws_args),
+            capture_output=False,
+            env=nixos_env,
+        )
+        if ws_result.returncode == 0:
+            _record_npm_lockfile_hash(shared_hermes_root)
+            print("  ✓ repo root + ui-tui, web workspaces (desktop skipped)")
+            return []
+
+        print("  ⚠ npm workspace install failed")
+        stderr = (ws_result.stderr or "").strip() if ws_result.stderr else ""
         if stderr:
             print(f"    {stderr.splitlines()[-1]}")
-        return _partial_update_failure("repo root")
-
-    # Step 2: install only the workspaces update needs (ui-tui, web).
-    # --workspace selects specific workspaces; the rest (desktop) are skipped.
-    ws_args = [*extra_args, "--workspace", "ui-tui", "--workspace", "web"]
-    ws_result = _m()._run_npm_install_deterministic(
-        npm,
-        _m().PROJECT_ROOT,
-        extra_args=tuple(ws_args),
-        capture_output=False,
-        env=nixos_env,
-    )
-    if ws_result.returncode == 0:
-        _record_npm_lockfile_hash(shared_hermes_root)
-        print("  ✓ repo root + ui-tui, web workspaces (desktop skipped)")
-        return []
-
-    print("  ⚠ npm workspace install failed")
-    stderr = (ws_result.stderr or "").strip() if ws_result.stderr else ""
-    if stderr:
-        print(f"    {stderr.splitlines()[-1]}")
-    return _partial_update_failure("ui-tui, web workspaces")
+        return _partial_update_failure("ui-tui, web workspaces")
 
 def _log_only_write(text: str) -> None:
     """Write ``text`` to ``~/.hermes/logs/update.log`` only, never the terminal.
