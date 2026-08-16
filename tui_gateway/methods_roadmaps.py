@@ -134,6 +134,7 @@ def _mutation_error_code(exc: Exception) -> int:
         InvalidRoadmapPlanTransitionError,
         InvalidRoadmapTodoTransitionError,
         InvalidRoadmapTransitionError,
+        PlanBatteryFailedError,
         RoadmapExistsError,
         RoadmapNodeNotFoundError,
         RoadmapNotFoundError,
@@ -146,6 +147,8 @@ def _mutation_error_code(exc: Exception) -> int:
 
     if isinstance(exc, StaleRoadmapVersionError):
         return 5064
+    if isinstance(exc, PlanBatteryFailedError):
+        return 5063
     if isinstance(exc, (RoadmapNotFoundError, RoadmapProjectNotFoundError,
                         RoadmapNodeNotFoundError, RoadmapTodoNotFoundError,
                         RoadmapVersionNotFoundError)):
@@ -374,6 +377,25 @@ def _admin_handle(rid, params: dict, *, operation: str) -> dict:
                 profile, project, roadmap_id, params.get("version"),
                 actor, _expected(params),
             )
+        elif operation == "roadmaps.spawn_kanban":
+            result = writer.spawn_kanban_cards(
+                profile, project, roadmap_id, params.get("version"),
+                params.get("node_id"), actor,
+                board_slug=params.get("board_slug"),
+            )
+        elif operation == "team.set":
+            result = writer.set_team(
+                profile, project, roadmap_id, params.get("version"),
+                actor,
+                workers=params.get("workers"),
+                assignments=params.get("assignments"),
+            )
+        elif operation == "readiness.set":
+            result = writer.set_readiness(
+                profile, project, roadmap_id, params.get("version"),
+                actor,
+                items=params.get("items"),
+            )
         else:
             raise ValueError(f"unknown roadmaps admin operation {operation!r}")
         return _ok(rid, result)
@@ -446,6 +468,24 @@ def _(rid, params: dict) -> dict:
     return _roadmaps_admin_handle(rid, params, operation="plans.validate")
 
 
+@method("roadmaps.spawn_kanban")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    return _roadmaps_admin_handle(rid, params, operation="roadmaps.spawn_kanban")
+
+
+@method("team.set")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    return _roadmaps_admin_handle(rid, params, operation="team.set")
+
+
+@method("readiness.set")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    return _roadmaps_admin_handle(rid, params, operation="readiness.set")
+
+
 @method("plans.list")
 @_profile_scoped
 def _(rid, params: dict) -> dict:
@@ -456,6 +496,167 @@ def _(rid, params: dict) -> dict:
 @_profile_scoped
 def _(rid, params: dict) -> dict:
     return _roadmaps_plans_read_handle(rid, params, operation="plans.get")
+
+
+def _plans_check_handle(rid, params: dict) -> dict:
+    try:
+        profile, project, roadmap_id = _scope(params, roadmap=True)
+        if project is None or roadmap_id is None:
+            raise ValueError("project_id and roadmap_id required")
+        version = params.get("version")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise ValueError("version must be an integer")
+        result = _service(profile).check_battery(profile, project, roadmap_id, version)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 5063, str(exc))
+    except Exception:
+        logger.exception("plans.check failed")
+        return _err(rid, 5061, "roadmaps unavailable")
+
+
+@method("plans.check")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    return _roadmaps_plans_check_handle(rid, params)
+
+
+def _kanban_links_handle(rid, params: dict) -> dict:
+    try:
+        profile, project, roadmap_id = _scope(params, roadmap=True)
+        if project is None or roadmap_id is None:
+            raise ValueError("project_id and roadmap_id required")
+        version = params.get("version")
+        if version is not None and (isinstance(version, bool) or not isinstance(version, int)):
+            raise ValueError("version must be an integer")
+        result = _service(profile).list_kanban_links(profile, project, roadmap_id, version)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 5063, str(exc))
+    except Exception:
+        logger.exception("roadmaps.kanban_links failed")
+        return _err(rid, 5061, "roadmaps unavailable")
+
+
+@method("roadmaps.kanban_links")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    return _roadmaps_kanban_links_handle(rid, params)
+
+
+def _team_check_handle(rid, params: dict) -> dict:
+    try:
+        profile, project, roadmap_id = _scope(params, roadmap=True)
+        if project is None or roadmap_id is None:
+            raise ValueError("project_id and roadmap_id required")
+        version = params.get("version")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise ValueError("version must be an integer")
+        result = _service(profile).check_team_battery(profile, project, roadmap_id, version)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 5063, str(exc))
+    except Exception:
+        logger.exception("team.check failed")
+        return _err(rid, 5061, "roadmaps unavailable")
+
+
+@method("team.check")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    return _roadmaps_team_check_handle(rid, params)
+
+
+def _readiness_check_handle(rid, params: dict) -> dict:
+    try:
+        profile, project, roadmap_id = _scope(params, roadmap=True)
+        if project is None or roadmap_id is None:
+            raise ValueError("project_id and roadmap_id required")
+        version = params.get("version")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise ValueError("version must be an integer")
+        result = _service(profile).check_readiness_battery(profile, project, roadmap_id, version)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 5063, str(exc))
+    except Exception:
+        logger.exception("readiness.check failed")
+        return _err(rid, 5061, "roadmaps unavailable")
+
+
+@method("readiness.check")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    return _roadmaps_readiness_check_handle(rid, params)
+
+
+def _team_list_handle(rid, params: dict) -> dict:
+    try:
+        profile, project, roadmap_id = _scope(params, roadmap=True)
+        if project is None or roadmap_id is None:
+            raise ValueError("project_id and roadmap_id required")
+        version = params.get("version")
+        if version is not None and (isinstance(version, bool) or not isinstance(version, int)):
+            raise ValueError("version must be an integer")
+        result = _service(profile).list_team(profile, project, roadmap_id, version)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 5063, str(exc))
+    except Exception:
+        logger.exception("team.list failed")
+        return _err(rid, 5061, "roadmaps unavailable")
+
+
+@method("team.list")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    return _roadmaps_team_list_handle(rid, params)
+
+
+def _readiness_list_handle(rid, params: dict) -> dict:
+    try:
+        profile, project, roadmap_id = _scope(params, roadmap=True)
+        if project is None or roadmap_id is None:
+            raise ValueError("project_id and roadmap_id required")
+        version = params.get("version")
+        if version is not None and (isinstance(version, bool) or not isinstance(version, int)):
+            raise ValueError("version must be an integer")
+        result = _service(profile).list_readiness(profile, project, roadmap_id, version)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 5063, str(exc))
+    except Exception:
+        logger.exception("readiness.list failed")
+        return _err(rid, 5061, "roadmaps unavailable")
+
+
+@method("readiness.list")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    return _roadmaps_readiness_list_handle(rid, params)
+
+
+def _board_handle(rid, params: dict) -> dict:
+    try:
+        profile, project, roadmap_id = _scope(params, roadmap=True)
+        if project is None or roadmap_id is None:
+            raise ValueError("project_id and roadmap_id required")
+        version = params.get("version")
+        if version is not None and (isinstance(version, bool) or not isinstance(version, int)):
+            raise ValueError("version must be an integer")
+        result = _service(profile).board(profile, project, roadmap_id, version)
+        return _ok(rid, result)
+    except ValueError as exc:
+        return _err(rid, 5063, str(exc))
+    except Exception:
+        logger.exception("roadmaps.board failed")
+        return _err(rid, 5061, "roadmaps unavailable")
+
+
+@method("roadmaps.board")
+@_profile_scoped
+def _(rid, params: dict) -> dict:
+    return _roadmaps_board_handle(rid, params)
 
 
 # ── roadmaps.planning_rules (T5c: versioned Vision planning rules) ──────────
@@ -509,4 +710,25 @@ def register(server) -> None:
     _sessions_handle.__globals__.update(vars(server))
     _sessions_handle.__globals__["_server_module"] = server
     server._roadmaps_sessions_handle = _sessions_handle
+    _plans_check_handle.__globals__.update(vars(server))
+    _plans_check_handle.__globals__["_server_module"] = server
+    server._roadmaps_plans_check_handle = _plans_check_handle
+    _kanban_links_handle.__globals__.update(vars(server))
+    _kanban_links_handle.__globals__["_server_module"] = server
+    server._roadmaps_kanban_links_handle = _kanban_links_handle
+    _team_check_handle.__globals__.update(vars(server))
+    _team_check_handle.__globals__["_server_module"] = server
+    server._roadmaps_team_check_handle = _team_check_handle
+    _team_list_handle.__globals__.update(vars(server))
+    _team_list_handle.__globals__["_server_module"] = server
+    server._roadmaps_team_list_handle = _team_list_handle
+    _readiness_check_handle.__globals__.update(vars(server))
+    _readiness_check_handle.__globals__["_server_module"] = server
+    server._roadmaps_readiness_check_handle = _readiness_check_handle
+    _readiness_list_handle.__globals__.update(vars(server))
+    _readiness_list_handle.__globals__["_server_module"] = server
+    server._roadmaps_readiness_list_handle = _readiness_list_handle
+    _board_handle.__globals__.update(vars(server))
+    _board_handle.__globals__["_server_module"] = server
+    server._roadmaps_board_handle = _board_handle
     _registry.install(server)

@@ -12,6 +12,7 @@ from hermes_cli.roadmaps_service import RoadmapsService
 from hermes_cli.roadmaps_writer import (
     InvalidRoadmapPlanTransitionError,
     InvalidRoadmapTransitionError,
+    PlanBatteryFailedError,
     RoadmapExistsError,
     RoadmapNotFoundError,
     RoadmapProjectNotFoundError,
@@ -97,25 +98,29 @@ def version_row(path: Path, version: int, roadmap_id: str = "r1") -> dict:
 
 
 def plan_payload(version: int = 2) -> dict:
-    """A valid full plan payload: 3 nodes, 2 relations, 2 todos."""
+    """A complete plan payload (objective → milestone → phase → todo) that
+    passes the Batterie Plan gate: objective with outcome, milestone with a
+    phase, phase with todos, every todo with acceptance criteria."""
     return {
         "version": version,
         "nodes": [
-            {"node_id": "obj", "kind": "objective", "title": "Objective"},
-            {"node_id": "phase-1", "kind": "phase", "title": "Phase 1",
-             "parent_node_id": "obj", "description": "First phase"},
-            {"node_id": "step-1", "kind": "step", "title": "Step 1",
-             "parent_node_id": "phase-1", "state": "ready",
-             "owner_agent": "agent-a"},
+            {"node_id": "obj", "kind": "objective", "title": "Objective",
+             "description": "Outcome and success criteria"},
+            {"node_id": "ms-1", "kind": "milestone", "title": "Milestone 1",
+             "parent_node_id": "obj"},
+            {"node_id": "ph-1", "kind": "phase", "title": "Phase 1",
+             "parent_node_id": "ms-1", "description": "First phase"},
         ],
         "relations": [
-            {"relation_id": "rel-1", "from_node_id": "step-1",
-             "to_node_id": "phase-1", "kind": "depends_on",
-             "reason": "phase gates the step"},
+            {"relation_id": "rel-1", "from_node_id": "ph-1",
+             "to_node_id": "ms-1", "kind": "depends_on",
+             "reason": "milestone gates the phase"},
         ],
         "todos": [
-            {"todo_id": "todo-1", "node_id": "step-1", "title": "Do it"},
-            {"todo_id": "todo-2", "title": "Unattached"},
+            {"todo_id": "todo-1", "node_id": "ph-1", "title": "Do it",
+             "acceptance": "Visible outcome"},
+            {"todo_id": "todo-2", "node_id": "ph-1", "title": "Attached work",
+             "acceptance": "Complete and verified"},
         ],
     }
 
@@ -364,7 +369,7 @@ def test_create_plan_inserts_version_nodes_relations_todos(roadmap_path: Path):
 def test_create_plan_default_version_is_max_plus_one(roadmap_path: Path):
     result = RoadmapsWriter(roadmap_path).create_plan(
         "prof", "p1", "r1", "agent-a",
-        nodes=[{"node_id": "n1", "kind": "step", "title": "N1"}],
+        nodes=[{"node_id": "n1", "kind": "phase", "title": "N1"}],
         relations=[], todos=[],
     )
     # version 1 already exists (roadmaps.create marker), so default is 2.
@@ -380,7 +385,7 @@ def test_create_plan_rejects_duplicate_version(roadmap_path: Path):
     with pytest.raises(RoadmapVersionExistsError):
         writer.create_plan(
             "prof", "p1", "r1", "agent-a",
-            nodes=[{"node_id": "n1", "kind": "step", "title": "N1"}],
+            nodes=[{"node_id": "n1", "kind": "phase", "title": "N1"}],
             relations=[], todos=[], version=1,
         )
     assert count(roadmap_path, "roadmap_versions") == 2
@@ -428,7 +433,7 @@ def test_create_plan_rejects_relation_to_unknown_node_and_self(roadmap_path: Pat
     with pytest.raises(ValueError, match="to_node_id"):
         writer.create_plan("prof", "p1", "r1", "agent-a", **payload)
     payload = plan_payload(version=2)
-    payload["relations"][0]["to_node_id"] = "step-1"
+    payload["relations"][0]["to_node_id"] = "ph-1"
     with pytest.raises(ValueError, match="differ"):
         writer.create_plan("prof", "p1", "r1", "agent-a", **payload)
 
@@ -436,9 +441,9 @@ def test_create_plan_rejects_relation_to_unknown_node_and_self(roadmap_path: Pat
 def test_create_plan_rejects_cyclic_relations(roadmap_path: Path):
     payload = plan_payload(version=2)
     payload["relations"] = [
-        {"relation_id": "a", "from_node_id": "step-1", "to_node_id": "phase-1",
+        {"relation_id": "a", "from_node_id": "ph-1", "to_node_id": "ms-1",
          "kind": "depends_on"},
-        {"relation_id": "b", "from_node_id": "phase-1", "to_node_id": "step-1",
+        {"relation_id": "b", "from_node_id": "ms-1", "to_node_id": "ph-1",
          "kind": "depends_on"},
     ]
     with pytest.raises(ValueError, match="cyclic relation"):
@@ -465,13 +470,13 @@ def test_create_plan_rejects_archived_roadmap_and_unknown_roadmap(roadmap_path: 
     with pytest.raises(InvalidRoadmapTransitionError):
         writer.create_plan(
             "prof", "p1", "r1", "agent-a",
-            nodes=[{"node_id": "n1", "kind": "step", "title": "N1"}],
+            nodes=[{"node_id": "n1", "kind": "phase", "title": "N1"}],
             relations=[], todos=[],
         )
     with pytest.raises(RoadmapNotFoundError):
         writer.create_plan(
             "prof", "p1", "r-missing", "agent-a",
-            nodes=[{"node_id": "n1", "kind": "step", "title": "N1"}],
+            nodes=[{"node_id": "n1", "kind": "phase", "title": "N1"}],
             relations=[], todos=[],
         )
 
@@ -505,8 +510,9 @@ def test_plans_get_returns_full_version(roadmap_path: Path):
     plan = result["plan"]
     assert plan["version"] == 2
     assert plan["state"] == "proposed"
-    assert {n["node_id"] for n in plan["nodes"]} == {"obj", "phase-1", "step-1"}
-    assert plan["nodes"][0]["parent_node_id"] is None
+    assert {n["node_id"] for n in plan["nodes"]} == {"obj", "ms-1", "ph-1"}
+    objective = next(n for n in plan["nodes"] if n["kind"] == "objective")
+    assert objective["parent_node_id"] is None
     assert len(plan["relations"]) == 1
     assert len(plan["todos"]) == 2
     missing = RoadmapsService(roadmap_path).get_plan("prof", "p1", "r1", 99)
@@ -517,17 +523,28 @@ def test_plans_get_returns_full_version(roadmap_path: Path):
 # ── plans.validate / plans.activate ──────────────────────────────────────────
 
 
-def test_plans_validate_transitions_draft_and_proposed(roadmap_path: Path):
+def test_plans_validate_transitions_proposed_and_is_terminal(roadmap_path: Path):
     writer = RoadmapsWriter(roadmap_path)
-    result = writer.validate_plan("prof", "p1", "r1", 1, "pierre", 0)
-    assert result["state"] == "validated"
-    assert version_row(roadmap_path, 1)["state"] == "validated"
     writer.create_plan("prof", "p1", "r1", "agent-a", **plan_payload(version=2))
     result = writer.validate_plan("prof", "p1", "r1", 2, "pierre", 0)
     assert result["state"] == "validated"
+    assert version_row(roadmap_path, 2)["state"] == "validated"
     # Validated is terminal for validate.
     with pytest.raises(InvalidRoadmapPlanTransitionError):
         writer.validate_plan("prof", "p1", "r1", 2, "pierre", 0)
+
+
+def test_plans_validate_refuses_incomplete_plan(roadmap_path: Path):
+    writer = RoadmapsWriter(roadmap_path)
+    writer.create_plan(
+        "prof", "p1", "r1", "agent-a",
+        nodes=[{"node_id": "n1", "kind": "phase", "title": "N1"}],
+        relations=[], todos=[],
+    )
+    with pytest.raises(PlanBatteryFailedError):
+        writer.validate_plan("prof", "p1", "r1", 2, "pierre", 0)
+    # Nothing transitioned: the version stays proposed.
+    assert version_row(roadmap_path, 2)["state"] == "proposed"
 
 
 def test_plans_validate_requires_expected_version(roadmap_path: Path):
@@ -575,11 +592,12 @@ def test_plans_activate_stale_expected_version_rejected(roadmap_path: Path):
 
 def test_plans_activate_on_fresh_roadmap_uses_expected_zero(roadmap_path: Path):
     writer = RoadmapsWriter(roadmap_path)
-    writer.validate_plan("prof", "p1", "r1", 1, "pierre", 0)
-    result = writer.activate_plan("prof", "p1", "r1", 1, "pierre", 0)
-    assert result["active_version"] == 1
+    writer.create_plan("prof", "p1", "r1", "agent-a", **plan_payload(version=2))
+    writer.validate_plan("prof", "p1", "r1", 2, "pierre", 0)
+    result = writer.activate_plan("prof", "p1", "r1", 2, "pierre", 0)
+    assert result["active_version"] == 2
     row = roadmap_row(roadmap_path)
-    assert row["active_version"] == 1
+    assert row["active_version"] == 2
     assert row["lifecycle_state"] == "in_progress"
 
 
@@ -593,7 +611,7 @@ def test_create_plan_deep_parent_chain_does_not_overflow(roadmap_path: Path):
     from hermes_cli.roadmaps_writer import MAX_PLAN_NODES
 
     depth = MAX_PLAN_NODES - 1  # within the bound, but deep enough to overflow recursion
-    nodes = [{"node_id": f"n{i}", "kind": "step", "title": f"Node {i}"} for i in range(depth)]
+    nodes = [{"node_id": f"n{i}", "kind": "phase", "title": f"Node {i}"} for i in range(depth)]
     # n1 -> n0 -> ... chain of parents (acyclic).
     for i in range(1, depth):
         nodes[i]["parent_node_id"] = f"n{i - 1}"
@@ -609,7 +627,7 @@ def test_create_plan_rejects_oversized_payloads(roadmap_path: Path):
     from hermes_cli.roadmaps_writer import MAX_PLAN_NODES, MAX_PLAN_RELATIONS, MAX_PLAN_TODOS
 
     writer = RoadmapsWriter(roadmap_path)
-    too_many = [{"node_id": f"n{i}", "kind": "step", "title": f"N{i}"} for i in range(MAX_PLAN_NODES + 1)]
+    too_many = [{"node_id": f"n{i}", "kind": "phase", "title": f"N{i}"} for i in range(MAX_PLAN_NODES + 1)]
     with pytest.raises(ValueError, match="at most"):
         writer.create_plan("prof", "p1", "r1", "agent-a", nodes=too_many, relations=[], todos=[])
     # relations/todos bounds are checked the same way; exercise one of them too.
@@ -630,12 +648,12 @@ def test_create_plan_rejects_path_separator_ids(roadmap_path: Path):
     with pytest.raises(ValueError, match="path separator"):
         writer.create_plan(
             "prof", "p1", "r1", "agent-a",
-            nodes=[{"node_id": "a/b", "kind": "step", "title": "bad"}],
+            nodes=[{"node_id": "a/b", "kind": "phase", "title": "bad"}],
             relations=[], todos=[],
         )
     with pytest.raises(ValueError, match="path separator"):
         writer.create_plan(
             "prof", "p1", "r1", "agent-a",
-            nodes=[{"node_id": "a\\b", "kind": "step", "title": "bad"}],
+            nodes=[{"node_id": "a\\b", "kind": "phase", "title": "bad"}],
             relations=[], todos=[],
         )

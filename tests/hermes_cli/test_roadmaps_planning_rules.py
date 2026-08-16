@@ -21,18 +21,18 @@ from hermes_cli.roadmaps_planning_rules import (
 
 def test_planning_rules_version_constant_is_current():
     assert isinstance(PLANNING_RULES_VERSION, str)
-    assert PLANNING_RULES_VERSION == "1.0"
+    assert PLANNING_RULES_VERSION == "1.1"
 
 
 def test_get_planning_rules_default_returns_current_version():
     rules = get_planning_rules()
     assert rules["version"] == PLANNING_RULES_VERSION
-    assert rules["version"] == "1.0"
+    assert rules["version"] == "1.1"
 
 
 def test_get_planning_rules_explicit_current_version():
-    rules = get_planning_rules("1.0")
-    assert rules["version"] == "1.0"
+    rules = get_planning_rules("1.1")
+    assert rules["version"] == "1.1"
 
 
 def test_get_planning_rules_blank_version_falls_back_to_current():
@@ -89,7 +89,7 @@ def test_planning_rules_prompt_declares_strict_json_output_structure():
     assert "objective" in prompt
     assert "phase" in prompt
     assert "milestone" in prompt
-    assert "step" in prompt
+    assert "acceptance" in prompt
     assert "decision" in prompt
 
 
@@ -129,4 +129,4 @@ def test_planning_rules_are_json_serializable():
 
 def test_planning_rules_are_immutable_per_version():
     # Same version → identical prompt bytes (a version is a frozen snapshot).
-    assert get_planning_rules("1.0")["prompt"] == get_planning_rules()["prompt"]
+    assert get_planning_rules("1.1")["prompt"] == get_planning_rules()["prompt"]

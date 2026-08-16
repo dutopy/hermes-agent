@@ -67,6 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from hermes_cli import projects_db
+from hermes_cli.roadmaps_battery import check_plan_battery
 from hermes_cli.sqlite_util import write_txn
 from src.roadmaps_contract import transition_node
 
@@ -119,6 +120,19 @@ class InvalidRoadmapPlanTransitionError(RoadmapsWriteError):
     """The requested plan/version state transition is not allowed."""
 
 
+class PlanBatteryFailedError(RoadmapsWriteError):
+    """The plan failed its Batterie Plan gate and cannot be validated yet.
+
+    Carries the structured ``failures`` list (stable codes) so the caller can
+    drive the auto-resolve loop instead of a blind retry.
+    """
+
+    def __init__(self, failures: list[dict[str, Any]]) -> None:
+        self.failures = failures
+        codes = ", ".join(failure["code"] for failure in failures)
+        super().__init__(f"plan failed the Batterie Plan gate: {codes}")
+
+
 # Allowed todo state transitions (open → in_progress → done, cancel from open/in_progress).
 TODO_TRANSITIONS: dict[str, frozenset[str]] = {
     "open": frozenset({"in_progress", "done", "cancelled"}),
@@ -135,7 +149,7 @@ PLAN_VERSION_STATES: frozenset[str] = frozenset(
     {"draft", "proposed", "validated", "superseded", "archived"}
 )
 NODE_KINDS: frozenset[str] = frozenset(
-    {"objective", "phase", "milestone", "step", "decision"}
+    {"objective", "milestone", "phase", "decision"}
 )
 NODE_STATES: frozenset[str] = frozenset(
     {"planned", "ready", "in_progress", "blocked", "completed", "archived"}
@@ -158,6 +172,13 @@ MAX_VERSION = 2**31 - 1
 MAX_PLAN_NODES = 2000
 MAX_PLAN_RELATIONS = 2000
 MAX_PLAN_TODOS = 2000
+# Readiness enums (spec §4.3): blockers are anticipated + resolved, authorizations
+# (secrets/accesses/permissions) are provided + verified before execution.
+READINESS_KINDS: frozenset[str] = frozenset({"blocker", "authorization"})
+READINESS_STATUSES: frozenset[str] = frozenset(
+    {"open", "resolved", "listed", "provided", "verified"}
+)
+READINESS_SUBTYPES: frozenset[str] = frozenset({"secret", "access", "permission"})
 
 
 def _required(value: Any, name: str, max_length: int = MAX_IDENTIFIER_LENGTH) -> str:
@@ -210,6 +231,13 @@ def _int_in_range(value: Any, name: str, low: int, high: int) -> int:
     if not (low <= value <= high):
         raise ValueError(f"{name} must be between {low} and {high}")
     return value
+
+
+def _name_list(value: Any, name: str) -> list[str]:
+    """Validate a list of non-empty identifier names (toolsets/skills)."""
+    if not isinstance(value, list):
+        raise ValueError(f"{name} must be a list")
+    return [_required(item, f"{name}[{i}]") for i, item in enumerate(value)]
 
 
 def _enum(value: Any, name: str, allowed: frozenset[str]) -> str:
@@ -402,6 +430,10 @@ def _validate_plan_todos(todos: Any, node_ids: set[str]) -> list[dict[str, Any]]
         title = _non_empty_text(
             item.get("title"), f"todos[{index}].title", max_length=MAX_TITLE_LENGTH
         )
+        acceptance = _optional_text(
+            item.get("acceptance"), f"todos[{index}].acceptance",
+            max_length=MAX_DESCRIPTION_LENGTH,
+        )
         state = item.get("state")
         state = "open" if state is None else _enum(state, f"todos[{index}].state", TODO_STATES)
         position = item.get("position")
@@ -410,7 +442,7 @@ def _validate_plan_todos(todos: Any, node_ids: set[str]) -> list[dict[str, Any]]
         )
         normalized.append({
             "todo_id": todo_id, "node_id": node_id, "title": title,
-            "state": state, "position": position,
+            "acceptance": acceptance, "state": state, "position": position,
         })
     return normalized
 
@@ -828,7 +860,7 @@ class RoadmapsWriter:
                     (now, actor, profile_id, project_id, roadmap_id),
                 )
                 updated = conn.execute(
-                    "SELECT todo_id, node_id, title, state, position, updated_at FROM roadmap_todos "
+                    "SELECT todo_id, node_id, title, acceptance, state, position, updated_at FROM roadmap_todos "
                     "WHERE profile_id=? AND project_id=? AND roadmap_id=? AND version=? AND todo_id=?",
                     (profile_id, project_id, roadmap_id, active_version, todo_id),
                 ).fetchone()
@@ -1255,11 +1287,12 @@ class RoadmapsWriter:
                     conn.execute(
                         "INSERT INTO roadmap_todos "
                         "(profile_id, project_id, roadmap_id, version, todo_id, "
-                        "node_id, title, state, position, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "node_id, title, state, position, created_at, updated_at, acceptance) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (profile_id, project_id, roadmap_id, version,
                          todo["todo_id"], todo["node_id"], todo["title"],
-                         todo["state"], todo["position"], now, now),
+                         todo["state"], todo["position"], now, now,
+                         todo["acceptance"]),
                     )
                 # Roadmap lifecycle: draft -> proposed once a plan is proposed.
                 lifecycle = (
@@ -1291,6 +1324,11 @@ class RoadmapsWriter:
         expected_version: Any,
     ) -> dict[str, Any]:
         """Transition a plan version ``draft|proposed -> validated``.
+
+        The Batterie Plan gate runs first: the version must pass
+        ``check_plan_battery`` (objective outcome + criteria, milestone → phase
+        → todo, every todo with acceptance, no orphan, acyclic) or
+        ``PlanBatteryFailedError`` is raised and nothing transitions.
 
         Governance op: the caller (toolset agent under Pierre's authority, or
         Pierre directly) is recorded as ``roadmaps.updated_by`` — the version
@@ -1332,6 +1370,11 @@ class RoadmapsWriter:
                         f"only draft/proposed plans can be validated; "
                         f"version {version} is {vrow['state']!r}"
                     )
+                battery = check_plan_battery(
+                    conn, profile_id, project_id, roadmap_id, version
+                )
+                if not battery["ok"]:
+                    raise PlanBatteryFailedError(battery["failures"])
                 now = int(time.time())
                 conn.execute(
                     "UPDATE roadmap_versions SET state='validated' "
@@ -1419,4 +1462,398 @@ class RoadmapsWriter:
             "scope": scope,
             "active_version": version,
             "previous_active_version": previous,
+        }
+
+    def spawn_kanban_cards(
+        self,
+        profile_id: str,
+        project_id: str,
+        roadmap_id: str,
+        version: Any,
+        node_id: str,
+        actor: str,
+        board_slug: str | None = None,
+    ) -> dict[str, Any]:
+        """Spawn one kanban card per todo under a milestone (jalon) and record
+        the durable todo→card link (spec §6). Idempotent: a todo already linked
+        is skipped, and task creation is deduped by a roadmap-scoped
+        idempotency key so a retry never double-writes a card.
+        """
+        from hermes_cli import kanban_db
+
+        profile_id = _required(profile_id, "profile_id")
+        project_id = _required(project_id, "project_id")
+        roadmap_id = _required(roadmap_id, "roadmap_id")
+        version = _int_in_range(version, "version", 1, MAX_VERSION)
+        node_id = _required(node_id, "node_id")
+        actor = _required(actor, "actor")
+        if board_slug is not None:
+            board_slug = _required(board_slug, "board_slug")
+        scope = {
+            "profile_id": profile_id,
+            "project_id": project_id,
+            "roadmap_id": roadmap_id,
+            "version": version,
+        }
+
+        with self._connection() as conn:
+            # Resolve the milestone and collect every phase descendant.
+            nodes = conn.execute(
+                "SELECT node_id, parent_node_id, kind FROM roadmap_nodes "
+                "WHERE profile_id=? AND project_id=? AND roadmap_id=? AND version=?",
+                (profile_id, project_id, roadmap_id, version),
+            ).fetchall()
+            by_id = {n["node_id"]: n for n in nodes}
+            milestone = by_id.get(node_id)
+            if milestone is None or milestone["kind"] != "milestone":
+                raise RoadmapNodeNotFoundError(
+                    f"milestone {node_id!r} not found in version {version}"
+                )
+            children: dict[str, list[str]] = {}
+            for n in nodes:
+                if n["parent_node_id"]:
+                    children.setdefault(n["parent_node_id"], []).append(n["node_id"])
+            phase_ids: set[str] = set()
+            stack = [node_id]
+            seen = {node_id}
+            while stack:
+                cur = stack.pop()
+                for child in children.get(cur, ()):
+                    if child in seen:
+                        continue
+                    seen.add(child)
+                    if by_id[child]["kind"] == "phase":
+                        phase_ids.add(child)
+                    stack.append(child)
+
+            if not phase_ids:
+                return {"success": True, "scope": scope, "board_slug": board_slug,
+                        "spawned": 0, "links": []}
+
+            todos = conn.execute(
+                "SELECT todo_id, node_id, title, acceptance FROM roadmap_todos "
+                "WHERE profile_id=? AND project_id=? AND roadmap_id=? AND version=?",
+                (profile_id, project_id, roadmap_id, version),
+            ).fetchall()
+            phase_todos = [t for t in todos if t["node_id"] in phase_ids]
+
+            existing = {
+                row["todo_id"]
+                for row in conn.execute(
+                    "SELECT todo_id FROM roadmap_kanban_links "
+                    "WHERE profile_id=? AND project_id=? AND roadmap_id=? AND version=?",
+                    (profile_id, project_id, roadmap_id, version),
+                )
+            }
+            to_spawn = [t for t in phase_todos if t["todo_id"] not in existing]
+            if not to_spawn:
+                return {"success": True, "scope": scope, "board_slug": board_slug,
+                        "spawned": 0, "links": []}
+
+            # Resolve the board: explicit > project-bound board > current board.
+            if board_slug is None:
+                proj = conn.execute(
+                    "SELECT board_slug FROM projects WHERE id=?", (project_id,)
+                ).fetchone()
+                board_slug = proj["board_slug"] if proj and proj["board_slug"] else None
+                if not board_slug:
+                    board_slug = kanban_db.get_current_board() or "default"
+
+            kconn = kanban_db.connect(board=board_slug)
+            spawned: list[dict[str, str]] = []
+            try:
+                for t in to_spawn:
+                    task_id = kanban_db.create_task(
+                        kconn,
+                        title=t["title"],
+                        body=(t["acceptance"] or "").strip() or None,
+                        created_by=actor,
+                        project_id=project_id,
+                        board=board_slug,
+                        idempotency_key=(
+                            f"roadmap:{profile_id}:{roadmap_id}:{version}:{t['todo_id']}"
+                        ),
+                    )
+                    spawned.append({"todo_id": t["todo_id"], "task_id": task_id})
+            finally:
+                kconn.close()
+
+            now = int(time.time())
+            with write_txn(conn):
+                for link in spawned:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO roadmap_kanban_links "
+                        "(profile_id, project_id, roadmap_id, version, todo_id, "
+                        "board_slug, task_id, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (profile_id, project_id, roadmap_id, version,
+                         link["todo_id"], board_slug, link["task_id"], now, now),
+                    )
+                if spawned:
+                    conn.execute(
+                        "UPDATE roadmaps SET updated_at=?, updated_by=? "
+                        "WHERE profile_id=? AND project_id=? AND roadmap_id=?",
+                        (now, actor, profile_id, project_id, roadmap_id),
+                    )
+
+        return {
+            "success": True,
+            "scope": scope,
+            "board_slug": board_slug,
+            "spawned": len(spawned),
+            "links": [
+                {"todo_id": link["todo_id"], "board_slug": board_slug, "task_id": link["task_id"]}
+                for link in spawned
+            ],
+        }
+
+    def set_team(
+        self,
+        profile_id: str,
+        project_id: str,
+        roadmap_id: str,
+        version: Any,
+        actor: str,
+        workers: Any = None,
+        assignments: Any = None,
+    ) -> dict[str, Any]:
+        """Replace the version's team (lane workers) and todo→worker ownership.
+
+        ``workers`` is a list of ``{worker_id, lane, model, provider,
+        thinking_level, toolsets, skills}`` where ``toolsets``/``skills`` are
+        lists of names (stored as JSON). ``assignments`` maps ``todo_id →
+        worker_id``. The team is replaced atomically (idempotent set): workers
+        are re-inserted and every todo's ``owner_worker`` is set or cleared.
+        Structure is validated here; completeness is the Batterie Team's job.
+        """
+        profile_id = _required(profile_id, "profile_id")
+        project_id = _required(project_id, "project_id")
+        roadmap_id = _required(roadmap_id, "roadmap_id")
+        version = _int_in_range(version, "version", 1, MAX_VERSION)
+        actor = _required(actor, "actor")
+        if workers is None:
+            workers = []
+        if assignments is None:
+            assignments = []
+        if not isinstance(workers, list):
+            raise ValueError("workers must be a list")
+        if not isinstance(assignments, list):
+            raise ValueError("assignments must be a list")
+
+        normalized: list[dict[str, Any]] = []
+        seen_workers: set[str] = set()
+        for index, item in enumerate(workers):
+            if not isinstance(item, dict):
+                raise ValueError(f"workers[{index}] must be an object")
+            worker_id = _required(item.get("worker_id"), f"workers[{index}].worker_id")
+            if worker_id in seen_workers:
+                raise ValueError(f"duplicate worker_id {worker_id!r} in workers")
+            seen_workers.add(worker_id)
+            normalized.append({
+                "worker_id": worker_id,
+                "lane": _non_empty_text(
+                    item.get("lane"), f"workers[{index}].lane", max_length=MAX_TITLE_LENGTH
+                ),
+                "model": _optional_text(
+                    item.get("model"), f"workers[{index}].model", max_length=MAX_IDENTIFIER_LENGTH
+                ),
+                "provider": _optional_text(
+                    item.get("provider"), f"workers[{index}].provider", max_length=MAX_IDENTIFIER_LENGTH
+                ),
+                "thinking_level": _optional_text(
+                    item.get("thinking_level"), f"workers[{index}].thinking_level",
+                    max_length=MAX_IDENTIFIER_LENGTH,
+                ),
+                "toolsets": _name_list(item.get("toolsets") or [], f"workers[{index}].toolsets"),
+                "skills": _name_list(item.get("skills") or [], f"workers[{index}].skills"),
+            })
+
+        worker_ids = {w["worker_id"] for w in normalized}
+        norm_assign: list[tuple[str, str]] = []
+        seen_todos: set[str] = set()
+        for index, item in enumerate(assignments):
+            if not isinstance(item, dict):
+                raise ValueError(f"assignments[{index}] must be an object")
+            todo_id = _required(item.get("todo_id"), f"assignments[{index}].todo_id")
+            if todo_id in seen_todos:
+                raise ValueError(f"duplicate todo_id {todo_id!r} in assignments")
+            seen_todos.add(todo_id)
+            worker_id = _required(item.get("worker_id"), f"assignments[{index}].worker_id")
+            if worker_id not in worker_ids:
+                raise ValueError(
+                    f"assignments[{index}].worker_id {worker_id!r} is not a worker of this payload"
+                )
+            norm_assign.append((todo_id, worker_id))
+
+        scope = {
+            "profile_id": profile_id,
+            "project_id": project_id,
+            "roadmap_id": roadmap_id,
+            "version": version,
+        }
+
+        with self._connection() as conn:
+            with write_txn(conn):
+                vrow = conn.execute(
+                    "SELECT 1 FROM roadmap_versions "
+                    "WHERE profile_id=? AND project_id=? AND roadmap_id=? AND version=?",
+                    (profile_id, project_id, roadmap_id, version),
+                ).fetchone()
+                if vrow is None:
+                    raise RoadmapVersionNotFoundError(
+                        f"version {version} not found for this roadmap"
+                    )
+                todo_rows = conn.execute(
+                    "SELECT todo_id FROM roadmap_todos "
+                    "WHERE profile_id=? AND project_id=? AND roadmap_id=? AND version=?",
+                    (profile_id, project_id, roadmap_id, version),
+                ).fetchall()
+                todo_ids = {r["todo_id"] for r in todo_rows}
+                for todo_id, _ in norm_assign:
+                    if todo_id not in todo_ids:
+                        raise RoadmapTodoNotFoundError(
+                            f"todo {todo_id!r} not found in version {version}"
+                        )
+
+                now = int(time.time())
+                conn.execute(
+                    "DELETE FROM roadmap_team_workers "
+                    "WHERE profile_id=? AND project_id=? AND roadmap_id=? AND version=?",
+                    (profile_id, project_id, roadmap_id, version),
+                )
+                for w in normalized:
+                    conn.execute(
+                        "INSERT INTO roadmap_team_workers "
+                        "(profile_id, project_id, roadmap_id, version, worker_id, lane, "
+                        "model, provider, thinking_level, toolsets, skills, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (profile_id, project_id, roadmap_id, version,
+                         w["worker_id"], w["lane"], w["model"], w["provider"],
+                         w["thinking_level"],
+                         json.dumps(w["toolsets"]) if w["toolsets"] else None,
+                         json.dumps(w["skills"]) if w["skills"] else None,
+                         now, now),
+                    )
+                assign_map = dict(norm_assign)
+                for row in todo_rows:
+                    owner = assign_map.get(row["todo_id"])
+                    conn.execute(
+                        "UPDATE roadmap_todos SET owner_worker=?, updated_at=? "
+                        "WHERE profile_id=? AND project_id=? AND roadmap_id=? AND version=? AND todo_id=?",
+                        (owner, now, profile_id, project_id, roadmap_id, version, row["todo_id"]),
+                    )
+                conn.execute(
+                    "UPDATE roadmaps SET updated_at=?, updated_by=? "
+                    "WHERE profile_id=? AND project_id=? AND roadmap_id=?",
+                    (now, actor, profile_id, project_id, roadmap_id),
+                )
+
+        return {
+            "success": True,
+            "scope": scope,
+            "workers": len(normalized),
+            "assigned": len(norm_assign),
+        }
+
+    def set_readiness(
+        self,
+        profile_id: str,
+        project_id: str,
+        roadmap_id: str,
+        version: Any,
+        actor: str,
+        items: Any = None,
+    ) -> dict[str, Any]:
+        """Replace the version's readiness items (blockers + authorizations).
+
+        ``items`` is a list of ``{item_id, kind, subtype, title, detail,
+        status}``. ``kind`` is 'blocker' or 'authorization'; ``subtype``
+        ('secret'|'access'|'permission') is optional and only meaningful for
+        authorizations. The set is replaced atomically (idempotent set).
+        Structure is validated here; completeness (resolved blockers with a
+        plan, verified authorizations) is the Batterie Readiness's job.
+        """
+        profile_id = _required(profile_id, "profile_id")
+        project_id = _required(project_id, "project_id")
+        roadmap_id = _required(roadmap_id, "roadmap_id")
+        version = _int_in_range(version, "version", 1, MAX_VERSION)
+        actor = _required(actor, "actor")
+        if items is None:
+            items = []
+        if not isinstance(items, list):
+            raise ValueError("items must be a list")
+
+        normalized: list[dict[str, Any]] = []
+        seen_items: set[str] = set()
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise ValueError(f"items[{index}] must be an object")
+            item_id = _required(item.get("item_id"), f"items[{index}].item_id")
+            if item_id in seen_items:
+                raise ValueError(f"duplicate item_id {item_id!r} in items")
+            seen_items.add(item_id)
+            kind = _enum(item.get("kind"), f"items[{index}].kind", READINESS_KINDS)
+            title = _non_empty_text(
+                item.get("title"), f"items[{index}].title", max_length=MAX_TITLE_LENGTH
+            )
+            status = _enum(item.get("status"), f"items[{index}].status", READINESS_STATUSES)
+            subtype = item.get("subtype")
+            if subtype is not None:
+                subtype = _enum(subtype, f"items[{index}].subtype", READINESS_SUBTYPES)
+            detail = _optional_text(
+                item.get("detail"), f"items[{index}].detail", max_length=MAX_REASON_LENGTH
+            )
+            normalized.append({
+                "item_id": item_id,
+                "kind": kind,
+                "subtype": subtype,
+                "title": title,
+                "detail": detail,
+                "status": status,
+            })
+
+        scope = {
+            "profile_id": profile_id,
+            "project_id": project_id,
+            "roadmap_id": roadmap_id,
+            "version": version,
+        }
+
+        with self._connection() as conn:
+            with write_txn(conn):
+                vrow = conn.execute(
+                    "SELECT 1 FROM roadmap_versions "
+                    "WHERE profile_id=? AND project_id=? AND roadmap_id=? AND version=?",
+                    (profile_id, project_id, roadmap_id, version),
+                ).fetchone()
+                if vrow is None:
+                    raise RoadmapVersionNotFoundError(
+                        f"version {version} not found for this roadmap"
+                    )
+                now = int(time.time())
+                conn.execute(
+                    "DELETE FROM roadmap_readiness "
+                    "WHERE profile_id=? AND project_id=? AND roadmap_id=? AND version=?",
+                    (profile_id, project_id, roadmap_id, version),
+                )
+                for item in normalized:
+                    conn.execute(
+                        "INSERT INTO roadmap_readiness "
+                        "(profile_id, project_id, roadmap_id, version, item_id, kind, "
+                        "subtype, title, detail, status, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (profile_id, project_id, roadmap_id, version,
+                         item["item_id"], item["kind"], item["subtype"], item["title"],
+                         item["detail"], item["status"], now, now),
+                    )
+                conn.execute(
+                    "UPDATE roadmaps SET updated_at=?, updated_by=? "
+                    "WHERE profile_id=? AND project_id=? AND roadmap_id=?",
+                    (now, actor, profile_id, project_id, roadmap_id),
+                )
+
+        return {
+            "success": True,
+            "scope": scope,
+            "items": len(normalized),
         }

@@ -34,7 +34,7 @@ def seed(path: Path) -> None:
         ("profile", "p", "r", 1, "n-running", None, "step", "Running", None, "in_progress", 10, "agent", None, 1, 1),
     )
     conn.execute(
-        "INSERT INTO roadmap_todos VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO roadmap_todos (profile_id, project_id, roadmap_id, version, todo_id, node_id, title, state, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ("profile", "p", "r", 1, "t-open", None, "Todo open", "open", 0, 1, 1),
     )
     conn.commit()

@@ -19,7 +19,7 @@ def seed(path: Path) -> None:
     conn.execute("INSERT INTO roadmap_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('prof', 'p1', 'r1', 1, 'n1', None, 'objective', 'Node', None, 'ready', 50, 'agent', None, 1, 2))
     conn.execute("INSERT INTO roadmap_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('prof', 'p1', 'r1', 1, 'n2', None, 'step', 'Step', None, 'planned', 0, None, None, 1, 2))
     conn.execute("INSERT INTO roadmap_relations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('prof', 'p1', 'r1', 1, 'rel', 'n1', 'n2', 'blocks', 'active', None))
-    conn.execute("INSERT INTO roadmap_todos VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('prof', 'p1', 'r1', 1, 't1', 'n1', 'Todo', 'open', 0, 1, 2))
+    conn.execute("INSERT INTO roadmap_todos (profile_id, project_id, roadmap_id, version, todo_id, node_id, title, state, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('prof', 'p1', 'r1', 1, 't1', 'n1', 'Todo', 'open', 0, 1, 2))
     conn.commit()
     conn.close()
 

@@ -295,6 +295,7 @@ _LONG_HANDLERS = frozenset(
         # under GIL pressure from concurrent agent turns that can be slow, so
         # keep reads AND writes off the WS reader thread.
         "plans.activate",
+        "plans.check",
         "plans.create",
         "plans.get",
         "plans.list",
@@ -307,8 +308,10 @@ _LONG_HANDLERS = frozenset(
         "roadmaps.complete_node",
         "roadmaps.create",
         "roadmaps.get",
+        "roadmaps.kanban_links",
         "roadmaps.list",
         "roadmaps.snapshot",
+        "roadmaps.spawn_kanban",
         "roadmaps.sessions",
         # planning_rules is a pure versioned-rules lookup (no DB); it stays on
         # the pool with the other roadmaps reads for a uniform off-reader path.
@@ -317,6 +320,13 @@ _LONG_HANDLERS = frozenset(
         "roadmaps.update",
         "roadmaps.update_progress",
         "roadmaps.update_todo",
+        "team.check",
+        "team.list",
+        "team.set",
+        "readiness.check",
+        "readiness.list",
+        "readiness.set",
+        "roadmaps.board",
     }
 )
 

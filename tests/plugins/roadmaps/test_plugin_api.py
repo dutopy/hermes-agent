@@ -163,7 +163,22 @@ def test_plan_validate_activate(client):
     # Version 2 becomes the first real plan (version 1 is the empty marker).
     r = client.post(
         f"/api/plugins/roadmaps/roadmaps/{rid}/plans?profile={PROFILE}&project_id={PROJECT}",
-        json={"actor": "pierre", "nodes": [], "relations": [], "todos": []},
+        json={
+            "actor": "pierre",
+            "nodes": [
+                {"node_id": "obj", "kind": "objective", "title": "Objective",
+                 "description": "Outcome and success criteria"},
+                {"node_id": "ms-1", "kind": "milestone", "title": "Milestone 1",
+                 "parent_node_id": "obj"},
+                {"node_id": "ph-1", "kind": "phase", "title": "Phase 1",
+                 "parent_node_id": "ms-1"},
+            ],
+            "relations": [],
+            "todos": [
+                {"todo_id": "t1", "node_id": "ph-1", "title": "Do it",
+                 "acceptance": "Visible outcome"},
+            ],
+        },
     )
     assert r.status_code == 200
     version = r.json()["version"]

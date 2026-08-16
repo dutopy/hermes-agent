@@ -37,8 +37,12 @@ def _prepare(tmp_path: Path, monkeypatch) -> Path:
 
 ADMIN_METHODS = {
     "roadmaps.create", "roadmaps.update", "roadmaps.archive",
+    "roadmaps.spawn_kanban", "roadmaps.kanban_links",
     "plans.create", "plans.list", "plans.get", "plans.activate",
     "plans.validate",
+    "team.set", "team.check", "team.list",
+    "readiness.set", "readiness.check", "readiness.list",
+    "roadmaps.board",
 }
 
 
@@ -194,7 +198,7 @@ def test_plans_create_rpc_round_trip(tmp_path, monkeypatch):
             "actor": "agent-a", "version": 2,
             "nodes": [
                 {"node_id": "obj", "kind": "objective", "title": "Objective"},
-                {"node_id": "s1", "kind": "step", "title": "Step 1",
+                {"node_id": "s1", "kind": "phase", "title": "Step 1",
                  "parent_node_id": "obj"},
             ],
             "relations": [
@@ -263,18 +267,245 @@ def test_plans_activate_rpc_non_validated_5066(tmp_path, monkeypatch):
 
 def test_plans_validate_activate_rpc_round_trip(tmp_path, monkeypatch):
     _prepare(tmp_path, monkeypatch)
+    server._methods["plans.create"](
+        "0",
+        {
+            "profile": "profile", "project_id": "p", "roadmap_id": "r",
+            "actor": "agent-a", "version": 2,
+            "nodes": [
+                {"node_id": "obj", "kind": "objective", "title": "Objective",
+                 "description": "Outcome and success criteria"},
+                {"node_id": "ms-1", "kind": "milestone", "title": "Milestone 1",
+                 "parent_node_id": "obj"},
+                {"node_id": "ph-1", "kind": "phase", "title": "Phase 1",
+                 "parent_node_id": "ms-1"},
+            ],
+            "relations": [],
+            "todos": [
+                {"todo_id": "t1", "node_id": "ph-1", "title": "Do it",
+                 "acceptance": "Visible outcome"},
+            ],
+        },
+    )
     validated = server._methods["plans.validate"](
         "1",
         {"profile": "profile", "project_id": "p", "roadmap_id": "r",
-         "actor": "pierre", "expected_version": 0, "version": 1},
+         "actor": "pierre", "expected_version": 0, "version": 2},
     )
     assert validated["result"]["state"] == "validated"
     activated = server._methods["plans.activate"](
         "2",
         {"profile": "profile", "project_id": "p", "roadmap_id": "r",
-         "actor": "pierre", "expected_version": 0, "version": 1},
+         "actor": "pierre", "expected_version": 0, "version": 2},
     )
-    assert activated["result"]["active_version"] == 1
+    assert activated["result"]["active_version"] == 2
+
+
+def test_roadmaps_spawn_kanban_and_links_rpc_round_trip(tmp_path, monkeypatch):
+    _prepare(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "kanban.db"))
+    server._methods["plans.create"](
+        "0",
+        {
+            "profile": "profile", "project_id": "p", "roadmap_id": "r",
+            "actor": "agent-a", "version": 2,
+            "nodes": [
+                {"node_id": "obj", "kind": "objective", "title": "Objective",
+                 "description": "Outcome and success criteria"},
+                {"node_id": "ms-1", "kind": "milestone", "title": "Milestone 1",
+                 "parent_node_id": "obj"},
+                {"node_id": "ph-1", "kind": "phase", "title": "Phase 1",
+                 "parent_node_id": "ms-1"},
+            ],
+            "relations": [],
+            "todos": [
+                {"todo_id": "t1", "node_id": "ph-1", "title": "Do it",
+                 "acceptance": "Visible outcome"},
+            ],
+        },
+    )
+    spawned = server._methods["roadmaps.spawn_kanban"](
+        "1",
+        {"profile": "profile", "project_id": "p", "roadmap_id": "r",
+         "actor": "pierre", "version": 2, "node_id": "ms-1", "board_slug": "default"},
+    )
+    assert spawned["result"]["success"] is True
+    assert spawned["result"]["spawned"] == 1
+    task_id = spawned["result"]["links"][0]["task_id"]
+
+    links = server._methods["roadmaps.kanban_links"](
+        "2",
+        {"profile": "profile", "project_id": "p", "roadmap_id": "r", "version": 2},
+    )
+    assert len(links["result"]["links"]) == 1
+    link = links["result"]["links"][0]
+    assert link["todo_id"] == "t1"
+    assert link["task_id"] == task_id
+    assert link["card"]["found"] is True
+
+
+def test_plans_check_rpc_returns_battery(tmp_path, monkeypatch):
+    _prepare(tmp_path, monkeypatch)
+    server._methods["plans.create"](
+        "0",
+        {
+            "profile": "profile", "project_id": "p", "roadmap_id": "r",
+            "actor": "agent-a", "version": 2,
+            "nodes": [
+                {"node_id": "obj", "kind": "objective", "title": "Objective",
+                 "description": "Outcome and success criteria"},
+                {"node_id": "ms-1", "kind": "milestone", "title": "Milestone 1",
+                 "parent_node_id": "obj"},
+                {"node_id": "ph-1", "kind": "phase", "title": "Phase 1",
+                 "parent_node_id": "ms-1"},
+            ],
+            "relations": [],
+            "todos": [
+                {"todo_id": "t1", "node_id": "ph-1", "title": "Do it",
+                 "acceptance": "Visible outcome"},
+            ],
+        },
+    )
+    response = server._methods["plans.check"](
+        "1",
+        {"profile": "profile", "project_id": "p", "roadmap_id": "r", "version": 2},
+    )
+    assert response["result"]["ok"] is True
+    assert response["result"]["failures"] == []
+
+
+def test_team_set_check_list_rpc_round_trip(tmp_path, monkeypatch):
+    _prepare(tmp_path, monkeypatch)
+    server._methods["plans.create"](
+        "0",
+        {
+            "profile": "profile", "project_id": "p", "roadmap_id": "r",
+            "actor": "agent-a", "version": 2,
+            "nodes": [
+                {"node_id": "obj", "kind": "objective", "title": "Objective",
+                 "description": "Outcome and success criteria"},
+                {"node_id": "ms-1", "kind": "milestone", "title": "Milestone 1",
+                 "parent_node_id": "obj"},
+                {"node_id": "ph-1", "kind": "phase", "title": "Phase 1",
+                 "parent_node_id": "ms-1"},
+            ],
+            "relations": [],
+            "todos": [
+                {"todo_id": "t1", "node_id": "ph-1", "title": "Do it",
+                 "acceptance": "Visible outcome"},
+            ],
+        },
+    )
+    set_result = server._methods["team.set"](
+        "1",
+        {
+            "profile": "profile", "project_id": "p", "roadmap_id": "r",
+            "actor": "pierre", "version": 2,
+            "workers": [
+                {"worker_id": "w1", "lane": "backend", "model": "gpt-5.6",
+                 "provider": "codex", "thinking_level": "high",
+                 "toolsets": ["terminal"], "skills": ["roadmaps"]},
+            ],
+            "assignments": [{"todo_id": "t1", "worker_id": "w1"}],
+        },
+    )
+    assert set_result["result"]["workers"] == 1
+    assert set_result["result"]["assigned"] == 1
+
+    check = server._methods["team.check"](
+        "2",
+        {"profile": "profile", "project_id": "p", "roadmap_id": "r", "version": 2},
+    )
+    assert check["result"] == {"ok": True, "failures": []}
+
+    listing = server._methods["team.list"](
+        "3",
+        {"profile": "profile", "project_id": "p", "roadmap_id": "r", "version": 2},
+    )
+    assert [w["worker_id"] for w in listing["result"]["workers"]] == ["w1"]
+    assert listing["result"]["assignments"] == [{"todo_id": "t1", "worker_id": "w1"}]
+
+
+def test_readiness_set_check_list_rpc_round_trip(tmp_path, monkeypatch):
+    _prepare(tmp_path, monkeypatch)
+    server._methods["plans.create"](
+        "0",
+        {
+            "profile": "profile", "project_id": "p", "roadmap_id": "r",
+            "actor": "agent-a", "version": 2,
+            "nodes": [
+                {"node_id": "obj", "kind": "objective", "title": "Objective",
+                 "description": "Outcome and success criteria"},
+                {"node_id": "ms-1", "kind": "milestone", "title": "Milestone 1",
+                 "parent_node_id": "obj"},
+                {"node_id": "ph-1", "kind": "phase", "title": "Phase 1",
+                 "parent_node_id": "ms-1"},
+            ],
+            "relations": [],
+            "todos": [
+                {"todo_id": "t1", "node_id": "ph-1", "title": "Do it",
+                 "acceptance": "Visible outcome"},
+            ],
+        },
+    )
+    set_result = server._methods["readiness.set"](
+        "1",
+        {
+            "profile": "profile", "project_id": "p", "roadmap_id": "r",
+            "actor": "pierre", "version": 2,
+            "items": [
+                {"item_id": "blk-1", "kind": "blocker", "title": "Rate limit",
+                 "detail": "Pre-provision", "status": "resolved"},
+                {"item_id": "secret-1", "kind": "authorization", "subtype": "secret",
+                 "title": "GitHub token", "status": "verified"},
+            ],
+        },
+    )
+    assert set_result["result"]["items"] == 2
+
+    check = server._methods["readiness.check"](
+        "2",
+        {"profile": "profile", "project_id": "p", "roadmap_id": "r", "version": 2},
+    )
+    assert check["result"] == {"ok": True, "failures": []}
+
+    listing = server._methods["readiness.list"](
+        "3",
+        {"profile": "profile", "project_id": "p", "roadmap_id": "r", "version": 2},
+    )
+    assert {i["item_id"] for i in listing["result"]["items"]} == {"blk-1", "secret-1"}
+
+
+def test_board_rpc_round_trip(tmp_path, monkeypatch):
+    _prepare(tmp_path, monkeypatch)
+    server._methods["plans.create"](
+        "0",
+        {
+            "profile": "profile", "project_id": "p", "roadmap_id": "r",
+            "actor": "agent-a", "version": 2,
+            "nodes": [
+                {"node_id": "obj", "kind": "objective", "title": "Objective",
+                 "description": "Outcome and success criteria"},
+                {"node_id": "ms-1", "kind": "milestone", "title": "Milestone 1",
+                 "parent_node_id": "obj"},
+                {"node_id": "ph-1", "kind": "phase", "title": "Phase 1",
+                 "parent_node_id": "ms-1"},
+            ],
+            "relations": [],
+            "todos": [
+                {"todo_id": "t1", "node_id": "ph-1", "title": "Do it",
+                 "acceptance": "Visible outcome"},
+            ],
+        },
+    )
+    board = server._methods["roadmaps.board"](
+        "1",
+        {"profile": "profile", "project_id": "p", "roadmap_id": "r", "version": 2},
+    )
+    assert board["result"]["found"] is True
+    assert [m["milestone"]["node_id"] for m in board["result"]["milestones"]] == ["ms-1"]
+    todo = board["result"]["milestones"][0]["phases"][0]["todos"][0]
+    assert todo["todo"]["todo_id"] == "t1"
 
 
 def test_plans_list_rpc_round_trip_and_unknown_roadmap(tmp_path, monkeypatch):
@@ -342,7 +573,7 @@ def test_planning_rules_rpc_returns_version_and_rules_no_scope(tmp_path, monkeyp
     # Global rules: no profile/project/roadmap scope required at all.
     _prepare(tmp_path, monkeypatch)
     response = server._methods["roadmaps.planning_rules"]("1", {})
-    assert response["result"]["version"] == "1.0"
+    assert response["result"]["version"] == "1.1"
     rules = response["result"]["rules"]
     assert isinstance(rules["prompt"], str)
     assert "json" in rules["prompt"].lower()

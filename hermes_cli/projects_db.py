@@ -187,11 +187,82 @@ CREATE TABLE IF NOT EXISTS roadmap_todos (
     position INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
+    acceptance TEXT,
+    owner_worker TEXT,
     PRIMARY KEY (profile_id, project_id, roadmap_id, version, todo_id),
     FOREIGN KEY (profile_id, project_id, roadmap_id, version)
       REFERENCES roadmap_versions(profile_id, project_id, roadmap_id, version) ON DELETE CASCADE,
     FOREIGN KEY (profile_id, project_id, roadmap_id, version, node_id)
       REFERENCES roadmap_nodes(profile_id, project_id, roadmap_id, version, node_id)
+);
+
+-- Durable Roadmaps→Kanban link (spec docs/roadmaps-plan-team-execute-20260816.md
+-- §6): each todo links 1:1 to a kanban card (board_slug + task_id). The kanban
+-- DB is root-anchored and shared across profiles, so the link records the board
+-- slug it lives in — the renderer never follows tip rotation itself.
+CREATE TABLE IF NOT EXISTS roadmap_kanban_links (
+    profile_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    project_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    roadmap_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    version INTEGER NOT NULL,
+    todo_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(todo_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    board_slug TEXT NOT NULL CHECK (length(trim(replace(replace(replace(board_slug, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    task_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(task_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (profile_id, project_id, roadmap_id, version, todo_id),
+    FOREIGN KEY (profile_id, project_id, roadmap_id, version, todo_id)
+      REFERENCES roadmap_todos(profile_id, project_id, roadmap_id, version, todo_id) ON DELETE CASCADE,
+    UNIQUE (board_slug, task_id)
+);
+
+-- Durable Roadmaps team (spec §5): one lane worker per type of work, sculpted
+-- with an explicit model/provider + thinking level + toolsets + skills. The
+-- model/provider pair and thinking level are decided explicitly (no silent
+-- substitution); toolsets/skills are JSON arrays of names. Todos reference a
+-- worker via ``roadmap_todos.owner_worker``.
+CREATE TABLE IF NOT EXISTS roadmap_team_workers (
+    profile_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    project_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    roadmap_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    version INTEGER NOT NULL,
+    worker_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(worker_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    lane TEXT NOT NULL CHECK (length(trim(replace(replace(replace(lane, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    model TEXT,
+    provider TEXT,
+    thinking_level TEXT,
+    toolsets TEXT,
+    skills TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (profile_id, project_id, roadmap_id, version, worker_id),
+    FOREIGN KEY (profile_id, project_id, roadmap_id, version)
+      REFERENCES roadmap_versions(profile_id, project_id, roadmap_id, version) ON DELETE CASCADE
+);
+
+-- Durable Roadmaps readiness (spec §4.3): blockers anticipated + authorizations
+-- required before execution. ``kind`` is 'blocker' or 'authorization';
+-- ``subtype`` ('secret'|'access'|'permission') only meaningful for
+-- authorizations; ``status`` encodes resolution (blocker) or provision state
+-- (authorization). The Batterie Readiness gates on resolved blockers (with a
+-- plan) and verified authorizations — a missing secret surfaces here, before
+-- Execute.
+CREATE TABLE IF NOT EXISTS roadmap_readiness (
+    profile_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    project_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    roadmap_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    version INTEGER NOT NULL,
+    item_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(item_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    kind TEXT NOT NULL CHECK (kind IN ('blocker','authorization')),
+    subtype TEXT CHECK (subtype IS NULL OR subtype IN ('secret','access','permission')),
+    title TEXT NOT NULL CHECK (length(trim(replace(replace(replace(title, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    detail TEXT,
+    status TEXT NOT NULL CHECK (status IN ('open','resolved','listed','provided','verified')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (profile_id, project_id, roadmap_id, version, item_id),
+    FOREIGN KEY (profile_id, project_id, roadmap_id, version)
+      REFERENCES roadmap_versions(profile_id, project_id, roadmap_id, version) ON DELETE CASCADE
 );
 
 -- Durable Roadmaps session links.  Only the stored/lineage session id belongs
@@ -278,6 +349,9 @@ _ROADMAP_TABLES = (
     "roadmap_nodes",
     "roadmap_relations",
     "roadmap_todos",
+    "roadmap_kanban_links",
+    "roadmap_team_workers",
+    "roadmap_readiness",
     "roadmap_sessions",
 )
 _ROADMAP_INDEXES = ("idx_roadmap_sessions_active_vision",)
@@ -327,6 +401,9 @@ _ROADMAP_CHECK_CONTRACT = MappingProxyType({
     "roadmap_nodes": ("length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(node_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "kind in ('objective','phase','milestone','step','decision')", "state in ('planned','ready','in_progress','blocked','completed','archived')", "progress between 0 and 100", "owner_agent is null or length(trim(replace(replace(replace(owner_agent, char(9), ''), char(10), ''), char(13), ''))) > 0", "parent_node_id is null or (length(trim(replace(replace(replace(parent_node_id, char(9), ''), char(10), ''), char(13), ''))) > 0 and parent_node_id <> node_id)"),
     "roadmap_relations": ("length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(relation_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(from_node_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(to_node_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "kind in ('depends_on','blocks','enables','follows','validates','supersedes')", "state in ('active','superseded','invalid')", "from_node_id <> to_node_id"),
     "roadmap_todos": ("length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(todo_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "node_id is null or length(trim(replace(replace(replace(node_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "state in ('open','in_progress','done','cancelled')"),
+    "roadmap_kanban_links": ("length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(todo_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(board_slug, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(task_id, char(9), ''), char(10), ''), char(13), ''))) > 0"),
+    "roadmap_team_workers": ("length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(worker_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(lane, char(9), ''), char(10), ''), char(13), ''))) > 0"),
+    "roadmap_readiness": ("length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(item_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "kind in ('blocker','authorization')", "subtype is null or subtype in ('secret','access','permission')", "length(trim(replace(replace(replace(title, char(9), ''), char(10), ''), char(13), ''))) > 0", "status in ('open','resolved','listed','provided','verified')"),
     "roadmap_sessions": ("length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "length(trim(replace(replace(replace(stored_session_id, char(9), ''), char(10), ''), char(13), ''))) > 0", "kind in ('vision')", "node_id is null", "plan_version is null or plan_version >= 1", "state in ('active','closed')", "length(trim(replace(replace(replace(actor, char(9), ''), char(10), ''), char(13), ''))) > 0"),
 })
 
@@ -389,12 +466,46 @@ _ROADMAP_SCHEMA_CONTRACT = MappingProxyType(
              ("roadmap_id", "TEXT", 1, 3), ("version", "INTEGER", 1, 4),
              ("todo_id", "TEXT", 1, 5), ("node_id", "TEXT", 0, 0), ("title", "TEXT", 1, 0),
              ("state", "TEXT", 1, 0), ("position", "INTEGER", 1, 0),
-             ("created_at", "INTEGER", 1, 0), ("updated_at", "INTEGER", 1, 0)),
+             ("created_at", "INTEGER", 1, 0), ("updated_at", "INTEGER", 1, 0),
+             ("acceptance", "TEXT", 0, 0), ("owner_worker", "TEXT", 0, 0)),
             (("roadmap_nodes", ("profile_id", "project_id", "roadmap_id", "version", "node_id"),
               ("profile_id", "project_id", "roadmap_id", "version", "node_id"), "NO ACTION", "NO ACTION"),
              ("roadmap_versions", ("profile_id", "project_id", "roadmap_id", "version"),
               ("profile_id", "project_id", "roadmap_id", "version"), "NO ACTION", "CASCADE")),
             ("primary key", "foreign key", "check", "state text not null check", "node_id text check"),
+        ),
+        "roadmap_kanban_links": (
+            (("profile_id", "TEXT", 1, 1), ("project_id", "TEXT", 1, 2),
+             ("roadmap_id", "TEXT", 1, 3), ("version", "INTEGER", 1, 4),
+             ("todo_id", "TEXT", 1, 5), ("board_slug", "TEXT", 1, 0),
+             ("task_id", "TEXT", 1, 0),
+             ("created_at", "INTEGER", 1, 0), ("updated_at", "INTEGER", 1, 0)),
+            (("roadmap_todos", ("profile_id", "project_id", "roadmap_id", "version", "todo_id"),
+              ("profile_id", "project_id", "roadmap_id", "version", "todo_id"), "NO ACTION", "CASCADE"),),
+            ("primary key", "foreign key", "check", "unique"),
+        ),
+        "roadmap_team_workers": (
+            (("profile_id", "TEXT", 1, 1), ("project_id", "TEXT", 1, 2),
+             ("roadmap_id", "TEXT", 1, 3), ("version", "INTEGER", 1, 4),
+             ("worker_id", "TEXT", 1, 5), ("lane", "TEXT", 1, 0),
+             ("model", "TEXT", 0, 0), ("provider", "TEXT", 0, 0),
+             ("thinking_level", "TEXT", 0, 0), ("toolsets", "TEXT", 0, 0),
+             ("skills", "TEXT", 0, 0),
+             ("created_at", "INTEGER", 1, 0), ("updated_at", "INTEGER", 1, 0)),
+            (("roadmap_versions", ("profile_id", "project_id", "roadmap_id", "version"),
+              ("profile_id", "project_id", "roadmap_id", "version"), "NO ACTION", "CASCADE"),),
+            ("primary key", "foreign key", "check"),
+        ),
+        "roadmap_readiness": (
+            (("profile_id", "TEXT", 1, 1), ("project_id", "TEXT", 1, 2),
+             ("roadmap_id", "TEXT", 1, 3), ("version", "INTEGER", 1, 4),
+             ("item_id", "TEXT", 1, 5), ("kind", "TEXT", 1, 0),
+             ("subtype", "TEXT", 0, 0), ("title", "TEXT", 1, 0),
+             ("detail", "TEXT", 0, 0), ("status", "TEXT", 1, 0),
+             ("created_at", "INTEGER", 1, 0), ("updated_at", "INTEGER", 1, 0)),
+            (("roadmap_versions", ("profile_id", "project_id", "roadmap_id", "version"),
+              ("profile_id", "project_id", "roadmap_id", "version"), "NO ACTION", "CASCADE"),),
+            ("primary key", "foreign key", "check"),
         ),
         "roadmap_sessions": (
             (("profile_id", "TEXT", 1, 1), ("project_id", "TEXT", 1, 2),
@@ -512,7 +623,7 @@ def _validate_roadmaps_schema(
     present = {
         row[0]
         for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?, ?, ?, ?, ?)",
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             _ROADMAP_TABLES,
         )
     }
@@ -674,6 +785,10 @@ _OPTIONAL_PROJECT_COLUMNS = ("board_slug", "primary_path", "icon", "color")
 # (a fresh store creates the full schema from SCHEMA_SQL instead).
 _OPTIONAL_ROADMAP_NODE_COLUMNS = ("block_reason",)
 
+# TEXT columns added to `roadmap_todos` after the Phase 1 port (acceptance
+# criteria, spec ``docs/roadmaps-plan-team-execute-20260816.md`` §4.1.4).
+_OPTIONAL_ROADMAP_TODO_COLUMNS = ("acceptance", "owner_worker")
+
 
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     """Add columns introduced after v1 to legacy DBs (safe on every open)."""
@@ -694,6 +809,15 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         for col in _OPTIONAL_ROADMAP_NODE_COLUMNS:
             if col not in node_cols:
                 _add_column_if_missing(conn, "roadmap_nodes", col, f"{col} TEXT")
+
+    todo_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='roadmap_todos'"
+    ).fetchone()
+    if todo_table is not None:
+        todo_cols = {row["name"] for row in conn.execute("PRAGMA table_info(roadmap_todos)")}
+        for col in _OPTIONAL_ROADMAP_TODO_COLUMNS:
+            if col not in todo_cols:
+                _add_column_if_missing(conn, "roadmap_todos", col, f"{col} TEXT")
 
 
 # ---------------------------------------------------------------------------

@@ -12,8 +12,8 @@ Two input forms are accepted:
 - **Structured Markdown** (documented fallback, LESS reliable): the agent
   MUST emit JSON; Markdown is tolerated only so a rough draft can be parsed.
   Grammar: ``# Title`` plan title; ``## <kind>: <title>`` nodes (kind
-  objective|phase|milestone|step|decision — otherwise heading level maps
-  2→phase, 3→milestone, 4→step, 5→decision), parents from heading nesting;
+  objective|milestone|phase|decision — otherwise heading level maps
+  2→objective, 3→milestone, 4→phase, 5→decision), parents from heading nesting;
   ``- [ ]`` / ``- [x]`` todos attached to the most recent node;
   ``- <relation_kind>: <From> -> <To>`` relations resolved by unique node
   title.
@@ -83,14 +83,14 @@ MAX_JSON_NESTING_DEPTH = 512
 _FENCE_RE = re.compile(r"```\s*json\s*\n(.*?)```", re.DOTALL)
 _MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _MARKDOWN_KIND_RE = re.compile(
-    r"^(objective|phase|milestone|step|decision)\s*:\s*(.+?)\s*$", re.IGNORECASE
+    r"^(objective|milestone|phase|decision)\s*:\s*(.+?)\s*$", re.IGNORECASE
 )
 _MARKDOWN_TODO_RE = re.compile(r"^[-*]\s+\[( |x|X)\]\s+(.+?)\s*$")
 _MARKDOWN_RELATION_RE = re.compile(
     r"^[-*]\s+(" + "|".join(sorted(RELATION_KINDS_VALID)) + r")\s*:\s*(.+?)\s*->\s*(.+?)\s*$"
 )
 
-_HEADING_LEVEL_KIND = {2: "phase", 3: "milestone", 4: "step", 5: "decision"}
+_HEADING_LEVEL_KIND = {2: "objective", 3: "milestone", 4: "phase", 5: "decision"}
 
 
 class PlanParseError(ValueError):
@@ -356,6 +356,7 @@ def _normalize_todos(todos: Any, node_ids: set[str]) -> list[dict[str, Any]]:
             "todo_id": todo_id,
             "node_id": node_id,
             "title": title.strip(),
+            "acceptance": item.get("acceptance"),
             "state": item.get("state", "open"),
             "position": position,
         })
@@ -543,6 +544,7 @@ def _parse_markdown(text: str) -> dict[str, Any]:
                 "todo_id": _generated_id("t_", used_todo_ids, todo_counter),
                 "node_id": node_id,
                 "title": todo.group(2).strip(),
+                "acceptance": None,
                 "state": "done" if done else "open",
                 "position": len(todos),
             })

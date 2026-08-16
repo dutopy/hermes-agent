@@ -90,6 +90,27 @@ export function useRoadmapSnapshot(profile, projectId, roadmapId, enabled) {
 }
 
 /**
+ * Board — the plan cartography (objective → milestones → phases → todos)
+ * with each todo's live kanban card state + owner worker. Loaded when the
+ * scope is complete. Its own query: the board resolves the active version
+ * backend-side and re-reads live card state on every refetch.
+ */
+export function useRoadmapBoard(profile, projectId, roadmapId, enabled) {
+  return useQuery({
+    queryKey: [ID, 'board', profile, projectId, roadmapId],
+    queryFn: async () => {
+      const res = await host.request(RPC.board, { profile, project_id: projectId, roadmap_id: roadmapId })
+      if (!assertResponseScope(res, { profile, projectId, roadmapId })) {
+        throw Object.assign(new Error('Response out of scope'), { code: 5063 })
+      }
+      return res
+    },
+    enabled,
+    refetchInterval: config.query.boardRefetchMs
+  })
+}
+
+/**
  * Scope selection state (project / roadmap), with derived option lists.
  * The project dropdown is fed by projects.list (projects param); the
  * roadmap options by roadmaps.list. Selections are kept valid when a list

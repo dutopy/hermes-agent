@@ -17,6 +17,9 @@ TABLES = {
     "roadmap_relations",
     "roadmap_sessions",
     "roadmap_todos",
+    "roadmap_kanban_links",
+    "roadmap_team_workers",
+    "roadmap_readiness",
 }
 
 ROADMAP_COLUMNS = {
@@ -25,7 +28,10 @@ ROADMAP_COLUMNS = {
     "roadmap_nodes": "profile_id TEXT, project_id TEXT, roadmap_id TEXT, version INTEGER, node_id TEXT, parent_node_id TEXT, kind TEXT, title TEXT, description TEXT, state TEXT, progress INTEGER, owner_agent TEXT, block_reason TEXT, created_at INTEGER, updated_at INTEGER",
     "roadmap_relations": "profile_id TEXT, project_id TEXT, roadmap_id TEXT, version INTEGER, relation_id TEXT, from_node_id TEXT, to_node_id TEXT, kind TEXT, state TEXT, reason TEXT",
     "roadmap_sessions": "profile_id TEXT, project_id TEXT, roadmap_id TEXT, stored_session_id TEXT, kind TEXT, node_id TEXT, plan_version INTEGER, state TEXT, actor TEXT, created_at INTEGER, updated_at INTEGER",
-    "roadmap_todos": "profile_id TEXT, project_id TEXT, roadmap_id TEXT, version INTEGER, todo_id TEXT, node_id TEXT, title TEXT, state TEXT, position INTEGER, created_at INTEGER, updated_at INTEGER",
+    "roadmap_todos": "profile_id TEXT, project_id TEXT, roadmap_id TEXT, version INTEGER, todo_id TEXT, node_id TEXT, title TEXT, state TEXT, position INTEGER, created_at INTEGER, updated_at INTEGER, acceptance TEXT, owner_worker TEXT",
+    "roadmap_kanban_links": "profile_id TEXT, project_id TEXT, roadmap_id TEXT, version INTEGER, todo_id TEXT, board_slug TEXT, task_id TEXT, created_at INTEGER, updated_at INTEGER",
+    "roadmap_team_workers": "profile_id TEXT, project_id TEXT, roadmap_id TEXT, version INTEGER, worker_id TEXT, lane TEXT, model TEXT, provider TEXT, thinking_level TEXT, toolsets TEXT, skills TEXT, created_at INTEGER, updated_at INTEGER",
+    "roadmap_readiness": "profile_id TEXT, project_id TEXT, roadmap_id TEXT, version INTEGER, item_id TEXT, kind TEXT, subtype TEXT, title TEXT, detail TEXT, status TEXT, created_at INTEGER, updated_at INTEGER",
 }
 
 
@@ -94,7 +100,7 @@ def test_real_store_enforces_active_version_and_qualified_node_relation_todo_sco
         )
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO roadmap_todos VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO roadmap_todos (profile_id, project_id, roadmap_id, version, todo_id, node_id, title, state, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ("profile-a", "project-a", "roadmap-a", 1, "todo", "missing", "T", "open", 0, 1, 1),
         )
     conn.close()

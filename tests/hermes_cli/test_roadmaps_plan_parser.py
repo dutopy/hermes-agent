@@ -28,7 +28,7 @@ VALID_PLAN = """{
     {"node_id": "obj", "kind": "objective", "title": "Objectif"},
     {"node_id": "ph1", "kind": "phase", "title": "Phase 1", "parent_node_id": "obj"},
     {"node_id": "ms1", "kind": "milestone", "title": "Jalon 1", "parent_node_id": "ph1"},
-    {"node_id": "st1", "kind": "step", "title": "Étape 1", "parent_node_id": "ms1",
+    {"node_id": "st1", "kind": "phase", "title": "Étape 1", "parent_node_id": "ms1",
      "state": "ready", "progress": 20}
   ],
   "relations": [
@@ -77,7 +77,7 @@ def test_parse_plan_normalizes_defaults():
     text = """{
       "title": "P",
       "nodes": [
-        {"node_id": "a", "kind": "step", "title": "A"}
+        {"node_id": "a", "kind": "phase", "title": "A"}
       ],
       "relations": [],
       "todos": []
@@ -157,7 +157,7 @@ def test_parse_plan_rejects_parent_cycle():
 
 
 def test_parse_plan_rejects_orphan_relation():
-    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A"}], '
+    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A"}], '
             '"relations": [{"relation_id": "r1", "from_node_id": "a", '
             '"to_node_id": "ghost", "kind": "depends_on"}]}')
     with pytest.raises(PlanParseError) as exc:
@@ -167,7 +167,7 @@ def test_parse_plan_rejects_orphan_relation():
 
 
 def test_parse_plan_rejects_self_relation():
-    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A"}], '
+    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A"}], '
             '"relations": [{"relation_id": "r1", "from_node_id": "a", '
             '"to_node_id": "a", "kind": "depends_on"}]}')
     with pytest.raises(PlanParseError) as exc:
@@ -176,8 +176,8 @@ def test_parse_plan_rejects_self_relation():
 
 
 def test_parse_plan_rejects_invalid_relation_kind():
-    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A"},'
-            '{"node_id": "b", "kind": "step", "title": "B"}], '
+    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A"},'
+            '{"node_id": "b", "kind": "phase", "title": "B"}], '
             '"relations": [{"relation_id": "r1", "from_node_id": "a", '
             '"to_node_id": "b", "kind": "mystifies"}]}')
     with pytest.raises(PlanParseError) as exc:
@@ -186,7 +186,7 @@ def test_parse_plan_rejects_invalid_relation_kind():
 
 
 def test_parse_plan_rejects_unknown_todo_node():
-    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A"}], '
+    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A"}], '
             '"todos": [{"todo_id": "t1", "node_id": "ghost", "title": "Do"}]}')
     with pytest.raises(PlanParseError) as exc:
         parse_plan(text)
@@ -196,8 +196,8 @@ def test_parse_plan_rejects_unknown_todo_node():
 
 def test_parse_plan_rejects_duplicate_node_id():
     text = ('{"title": "P", "nodes": ['
-            '{"node_id": "a", "kind": "step", "title": "A"},'
-            '{"node_id": "a", "kind": "step", "title": "B"}]}')
+            '{"node_id": "a", "kind": "phase", "title": "A"},'
+            '{"node_id": "a", "kind": "phase", "title": "B"}]}')
     with pytest.raises(PlanParseError) as exc:
         parse_plan(text)
     assert "duplicate" in str(exc.value).lower()
@@ -205,8 +205,8 @@ def test_parse_plan_rejects_duplicate_node_id():
 
 
 def test_parse_plan_rejects_duplicate_relation_id():
-    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A"},'
-            '{"node_id": "b", "kind": "step", "title": "B"}], '
+    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A"},'
+            '{"node_id": "b", "kind": "phase", "title": "B"}], '
             '"relations": ['
             '{"relation_id": "r1", "from_node_id": "a", "to_node_id": "b", "kind": "depends_on"},'
             '{"relation_id": "r1", "from_node_id": "b", "to_node_id": "a", "kind": "depends_on"}]}')
@@ -217,21 +217,21 @@ def test_parse_plan_rejects_duplicate_relation_id():
 
 
 def test_parse_plan_rejects_empty_node_title():
-    text = '{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "  "}]}'
+    text = '{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "  "}]}'
     with pytest.raises(PlanParseError) as exc:
         parse_plan(text)
     assert exc.value.field == "nodes[0].title"
 
 
 def test_parse_plan_rejects_blank_node_id():
-    text = '{"title": "P", "nodes": [{"node_id": "  ", "kind": "step", "title": "A"}]}'
+    text = '{"title": "P", "nodes": [{"node_id": "  ", "kind": "phase", "title": "A"}]}'
     with pytest.raises(PlanParseError) as exc:
         parse_plan(text)
     assert exc.value.field == "nodes[0].node_id"
 
 
 def test_parse_plan_rejects_invalid_state():
-    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A", '
+    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A", '
             '"state": "flying"}]}')
     with pytest.raises(PlanParseError) as exc:
         parse_plan(text)
@@ -239,7 +239,7 @@ def test_parse_plan_rejects_invalid_state():
 
 
 def test_parse_plan_rejects_invalid_progress():
-    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A", '
+    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A", '
             '"progress": 150}]}')
     with pytest.raises(PlanParseError) as exc:
         parse_plan(text)
@@ -247,7 +247,7 @@ def test_parse_plan_rejects_invalid_progress():
 
 
 def test_parse_plan_rejects_negative_position():
-    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A"}], '
+    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A"}], '
             '"todos": [{"todo_id": "t1", "node_id": "a", "title": "Do", "position": -1}]}')
     with pytest.raises(PlanParseError) as exc:
         parse_plan(text)
@@ -262,7 +262,7 @@ def test_parse_plan_rejects_non_json():
 
 
 def test_parse_plan_json_syntax_error_carries_line_and_column():
-    text = '{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A",}]}'
+    text = '{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A",}]}'
     with pytest.raises(PlanParseError) as exc:
         parse_plan(text)
     assert exc.value.line is not None
@@ -276,7 +276,7 @@ def test_parse_plan_json_syntax_error_carries_line_and_column():
 def test_parse_plan_generates_missing_node_ids_with_n_prefix():
     text = ('{"title": "P", "nodes": ['
             '{"kind": "objective", "title": "Obj"},'
-            '{"kind": "step", "title": "S", "parent_node_id": "n_0001"}]}')
+            '{"kind": "phase", "title": "S", "parent_node_id": "n_0001"}]}')
     payload = parse_plan(text)
     ids = _node_ids(payload)
     assert len(set(ids)) == 2
@@ -285,8 +285,8 @@ def test_parse_plan_generates_missing_node_ids_with_n_prefix():
 
 
 def test_parse_plan_generates_missing_relation_and_todo_ids():
-    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A"},'
-            '{"node_id": "b", "kind": "step", "title": "B"}], '
+    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A"},'
+            '{"node_id": "b", "kind": "phase", "title": "B"}], '
             '"relations": [{"from_node_id": "a", "to_node_id": "b", "kind": "depends_on"}], '
             '"todos": [{"node_id": "a", "title": "Do"}]}')
     payload = parse_plan(text)
@@ -304,8 +304,8 @@ def test_parse_plan_keeps_provided_ids_untouched():
 
 
 def test_parse_plan_dedupes_identical_relations():
-    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A"},'
-            '{"node_id": "b", "kind": "step", "title": "B"}], '
+    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A"},'
+            '{"node_id": "b", "kind": "phase", "title": "B"}], '
             '"relations": ['
             '{"relation_id": "r1", "from_node_id": "a", "to_node_id": "b", "kind": "depends_on"},'
             '{"relation_id": "r2", "from_node_id": "a", "to_node_id": "b", "kind": "depends_on"}]}')
@@ -315,7 +315,7 @@ def test_parse_plan_dedupes_identical_relations():
 
 
 def test_parse_plan_dedupes_identical_todos():
-    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "step", "title": "A"}], '
+    text = ('{"title": "P", "nodes": [{"node_id": "a", "kind": "phase", "title": "A"}], '
             '"todos": ['
             '{"todo_id": "t1", "node_id": "a", "title": "Do"},'
             '{"todo_id": "t2", "node_id": "a", "title": "Do"}]}')
@@ -331,8 +331,8 @@ def test_parse_plan_markdown_fallback_documented_behavior():
     """The agent MUST emit strict JSON; Markdown is a documented fallback.
 
     Grammar (documented): ``# Title`` plan title, ``## <kind>: <title>``
-    nodes (kind objective|phase|milestone|step|decision; heading level also
-    maps 2→phase, 3→milestone, 4→step, 5→decision), ``- [ ]`` todos
+    nodes (kind objective|milestone|phase|decision; heading level also
+    maps 2→objective, 3→milestone, 4→phase, 5→decision), ``- [ ]`` todos
     attached to the most recent node, ``- <kind>: A -> B`` relations
     resolved by unique node title.  IDs are generated deterministically.
     """
@@ -340,7 +340,7 @@ def test_parse_plan_markdown_fallback_documented_behavior():
 ## objective: Objectif
 ## phase: Phase 1
 ### milestone: Jalon 1
-#### step: Étape 1
+#### phase: Étape 1
 - [ ] Faire X
 - [x] Déjà fait
 - depends_on: Étape 1 -> Jalon 1
@@ -348,7 +348,7 @@ def test_parse_plan_markdown_fallback_documented_behavior():
     payload = parse_plan(text)
     assert payload["title"] == "Plan Markdown"
     kinds = [n["kind"] for n in payload["nodes"]]
-    assert kinds == ["objective", "phase", "milestone", "step"]
+    assert kinds == ["objective", "phase", "milestone", "phase"]
     assert payload["nodes"][3]["parent_node_id"] == payload["nodes"][2]["node_id"]
     assert [t["title"] for t in payload["todos"]] == ["Faire X", "Déjà fait"]
     assert payload["todos"][0]["state"] == "open"
@@ -380,7 +380,7 @@ def test_parse_plan_payload_is_ready_for_create_plan():
                     "state", "reason"):
             assert key in relation
     for todo in payload["todos"]:
-        for key in ("todo_id", "node_id", "title", "state", "position"):
+        for key in ("todo_id", "node_id", "title", "acceptance", "state", "position"):
             assert key in todo
     assert payload["source"] == "vision-test"
     assert payload["actor"] == "pierre"
@@ -468,7 +468,7 @@ def _reversed_chain_nodes(count: int) -> list[dict]:
     return [
         {
             "node_id": f"n{i}",
-            "kind": "step",
+            "kind": "phase",
             "title": f"S{i}",
             "parent_node_id": None if i == 0 else f"n{i-1}",
         }
@@ -499,7 +499,7 @@ def test_parse_plan_long_parent_chain_cycle_is_structured(monkeypatch):
 
 def test_parse_plan_rejects_too_many_nodes():
     nodes = [
-        {"node_id": f"n{i}", "kind": "step", "title": f"S{i}"}
+        {"node_id": f"n{i}", "kind": "phase", "title": f"S{i}"}
         for i in range(plan_parser_mod.MAX_PLAN_NODES + 1)
     ]
     text = json.dumps({"title": "P", "nodes": nodes, "relations": [], "todos": []})
@@ -511,7 +511,7 @@ def test_parse_plan_rejects_too_many_nodes():
 
 def test_parse_plan_rejects_too_many_markdown_nodes():
     lines = ["# P", "## objective: Obj"]
-    lines += [f"### step: S{i}" for i in range(plan_parser_mod.MAX_PLAN_NODES + 1)]
+    lines += [f"### phase: S{i}" for i in range(plan_parser_mod.MAX_PLAN_NODES + 1)]
     with pytest.raises(PlanParseError) as exc:
         parse_plan("\n".join(lines))
     assert exc.value.field == "input"
@@ -521,7 +521,7 @@ def test_parse_plan_rejects_too_many_markdown_nodes():
 def test_parse_plan_markdown_scales_linearly(monkeypatch):
     monkeypatch.setattr(plan_parser_mod, "MAX_PLAN_NODES", 20_000)
     count = 8_000
-    lines = ["# Plan Massif"] + [f"## step: Étape {i}" for i in range(count)]
+    lines = ["# Plan Massif"] + [f"## phase: Étape {i}" for i in range(count)]
     start = time.monotonic()
     payload = parse_plan("\n".join(lines))
     elapsed = time.monotonic() - start

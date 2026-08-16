@@ -44,6 +44,7 @@ import { ScopeBar } from './scope.js'
 import { CopilotBar } from './copilot.js'
 import { ThreadView } from './views/fil.js'
 import { MapView } from './views/map.js'
+import { BoardView } from './views/board.js'
 import { PlanView } from './views/plan.js'
 import { MilestonesView } from './views/milestones.js'
 import { DecisionsView } from './views/decisions.js'
@@ -52,7 +53,7 @@ import { VisionLane } from './views/vision.js'
 import { Inspector } from './inspector.js'
 
 /** Tabs that participate in node selection + the Inspector panel. */
-const INSPECTOR_TABS = new Set(['thread', 'map', 'milestones'])
+const INSPECTOR_TABS = new Set(['thread', 'map', 'milestones', 'board'])
 
 /** Underline tabs — active = accent underline, no boxes. */
 function ViewTabs({ active, onChange }) {
@@ -89,6 +90,9 @@ function ActiveView({ tab, snapshot, version, selectedId, onSelect, compact, den
   }
   if (tab === 'map') {
     return jsx(MapView, { version, selectedId, onSelect })
+  }
+  if (tab === 'board') {
+    return jsx(BoardView, { scope, selectedId, onSelect })
   }
   if (tab === 'plan') {
     return jsx(PlanView, { snapshot, scope, actor, onMutated })

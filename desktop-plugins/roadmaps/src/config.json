@@ -7,7 +7,8 @@
   "query": {
     "listRefetchMs": 30000,
     "projectsRefetchMs": 30000,
-    "snapshotRefetchMs": 60000
+    "snapshotRefetchMs": 60000,
+    "boardRefetchMs": 30000
   },
   "states": {
     "tone": {
@@ -48,8 +49,22 @@
       "blocks": "debug-disconnect"
     }
   },
+  "board": {
+    "cardTone": {
+      "triage": "muted",
+      "todo": "muted",
+      "scheduled": "muted",
+      "ready": "good",
+      "running": "warn",
+      "blocked": "bad",
+      "review": "warn",
+      "done": "good",
+      "archived": "muted"
+    }
+  },
   "tabs": [
     { "id": "thread", "label": "Thread", "codicon": "list-ordered" },
+    { "id": "board", "label": "Board", "codicon": "project" },
     { "id": "map", "label": "Map", "codicon": "graph" },
     { "id": "plan", "label": "Plan", "codicon": "versions" },
     { "id": "milestones", "label": "Milestones", "codicon": "milestone" },
@@ -82,6 +97,7 @@
     "person",
     "person-add",
     "play",
+    "project",
     "target",
     "versions"
   ]

@@ -17,6 +17,7 @@ export const ID = 'roadmaps'
 export const RPC = {
   list: 'roadmaps.list',
   snapshot: 'roadmaps.snapshot',
+  board: 'roadmaps.board',
   claim_node: 'roadmaps.claim_node',
   update_progress: 'roadmaps.update_progress',
   complete_node: 'roadmaps.complete_node',

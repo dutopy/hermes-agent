@@ -101,11 +101,63 @@ CREATE TABLE IF NOT EXISTS roadmap_todos (
     position INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
+    acceptance TEXT,
+    owner_worker TEXT,
     PRIMARY KEY (profile_id, project_id, roadmap_id, version, todo_id),
     FOREIGN KEY (profile_id, project_id, roadmap_id, version)
       REFERENCES roadmap_versions(profile_id, project_id, roadmap_id, version) ON DELETE CASCADE,
     FOREIGN KEY (profile_id, project_id, roadmap_id, version, node_id)
       REFERENCES roadmap_nodes(profile_id, project_id, roadmap_id, version, node_id)
+);
+CREATE TABLE IF NOT EXISTS roadmap_kanban_links (
+    profile_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    project_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    roadmap_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    version INTEGER NOT NULL,
+    todo_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(todo_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    board_slug TEXT NOT NULL CHECK (length(trim(replace(replace(replace(board_slug, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    task_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(task_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (profile_id, project_id, roadmap_id, version, todo_id),
+    FOREIGN KEY (profile_id, project_id, roadmap_id, version, todo_id)
+      REFERENCES roadmap_todos(profile_id, project_id, roadmap_id, version, todo_id) ON DELETE CASCADE,
+    UNIQUE (board_slug, task_id)
+);
+CREATE TABLE IF NOT EXISTS roadmap_team_workers (
+    profile_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    project_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    roadmap_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    version INTEGER NOT NULL,
+    worker_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(worker_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    lane TEXT NOT NULL CHECK (length(trim(replace(replace(replace(lane, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    model TEXT,
+    provider TEXT,
+    thinking_level TEXT,
+    toolsets TEXT,
+    skills TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (profile_id, project_id, roadmap_id, version, worker_id),
+    FOREIGN KEY (profile_id, project_id, roadmap_id, version)
+      REFERENCES roadmap_versions(profile_id, project_id, roadmap_id, version) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS roadmap_readiness (
+    profile_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(profile_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    project_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(project_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    roadmap_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    version INTEGER NOT NULL,
+    item_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(item_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    kind TEXT NOT NULL CHECK (kind IN ('blocker','authorization')),
+    subtype TEXT CHECK (subtype IS NULL OR subtype IN ('secret','access','permission')),
+    title TEXT NOT NULL CHECK (length(trim(replace(replace(replace(title, char(9), ''), char(10), ''), char(13), ''))) > 0),
+    detail TEXT,
+    status TEXT NOT NULL CHECK (status IN ('open','resolved','listed','provided','verified')),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (profile_id, project_id, roadmap_id, version, item_id),
+    FOREIGN KEY (profile_id, project_id, roadmap_id, version)
+      REFERENCES roadmap_versions(profile_id, project_id, roadmap_id, version) ON DELETE CASCADE
 );
 """
 
@@ -169,12 +221,46 @@ _SCHEMA_CONTRACT = {
                     ("roadmap_id", "TEXT", 1, 3), ("version", "INTEGER", 1, 4),
                     ("todo_id", "TEXT", 1, 5), ("node_id", "TEXT", 0, 0), ("title", "TEXT", 1, 0),
                     ("state", "TEXT", 1, 0), ("position", "INTEGER", 1, 0),
-                    ("created_at", "INTEGER", 1, 0), ("updated_at", "INTEGER", 1, 0)),
+                    ("created_at", "INTEGER", 1, 0), ("updated_at", "INTEGER", 1, 0),
+                    ("acceptance", "TEXT", 0, 0), ("owner_worker", "TEXT", 0, 0)),
         "fks": (("roadmap_nodes", ("profile_id", "project_id", "roadmap_id", "version", "node_id"),
                  ("profile_id", "project_id", "roadmap_id", "version", "node_id"), "NO ACTION"),
                 ("roadmap_versions", ("profile_id", "project_id", "roadmap_id", "version"),
                  ("profile_id", "project_id", "roadmap_id", "version"), "CASCADE")),
         "sql_markers": ("primary key", "foreign key", "check", "state text not null check", "node_id text check"),
+    },
+    "roadmap_kanban_links": {
+        "columns": (("profile_id", "TEXT", 1, 1), ("project_id", "TEXT", 1, 2),
+                    ("roadmap_id", "TEXT", 1, 3), ("version", "INTEGER", 1, 4),
+                    ("todo_id", "TEXT", 1, 5), ("board_slug", "TEXT", 1, 0),
+                    ("task_id", "TEXT", 1, 0),
+                    ("created_at", "INTEGER", 1, 0), ("updated_at", "INTEGER", 1, 0)),
+        "fks": (("roadmap_todos", ("profile_id", "project_id", "roadmap_id", "version", "todo_id"),
+                 ("profile_id", "project_id", "roadmap_id", "version", "todo_id"), "CASCADE"),),
+        "sql_markers": ("primary key", "foreign key", "check", "unique"),
+    },
+    "roadmap_team_workers": {
+        "columns": (("profile_id", "TEXT", 1, 1), ("project_id", "TEXT", 1, 2),
+                    ("roadmap_id", "TEXT", 1, 3), ("version", "INTEGER", 1, 4),
+                    ("worker_id", "TEXT", 1, 5), ("lane", "TEXT", 1, 0),
+                    ("model", "TEXT", 0, 0), ("provider", "TEXT", 0, 0),
+                    ("thinking_level", "TEXT", 0, 0), ("toolsets", "TEXT", 0, 0),
+                    ("skills", "TEXT", 0, 0),
+                    ("created_at", "INTEGER", 1, 0), ("updated_at", "INTEGER", 1, 0)),
+        "fks": (("roadmap_versions", ("profile_id", "project_id", "roadmap_id", "version"),
+                 ("profile_id", "project_id", "roadmap_id", "version"), "CASCADE"),),
+        "sql_markers": ("primary key", "foreign key", "check"),
+    },
+    "roadmap_readiness": {
+        "columns": (("profile_id", "TEXT", 1, 1), ("project_id", "TEXT", 1, 2),
+                    ("roadmap_id", "TEXT", 1, 3), ("version", "INTEGER", 1, 4),
+                    ("item_id", "TEXT", 1, 5), ("kind", "TEXT", 1, 0),
+                    ("subtype", "TEXT", 0, 0), ("title", "TEXT", 1, 0),
+                    ("detail", "TEXT", 0, 0), ("status", "TEXT", 1, 0),
+                    ("created_at", "INTEGER", 1, 0), ("updated_at", "INTEGER", 1, 0)),
+        "fks": (("roadmap_versions", ("profile_id", "project_id", "roadmap_id", "version"),
+                 ("profile_id", "project_id", "roadmap_id", "version"), "CASCADE"),),
+        "sql_markers": ("primary key", "foreign key", "check"),
     },
 }
 
@@ -260,7 +346,7 @@ def test_initialization_is_idempotent_and_uses_only_explicit_db_path(tmp_path: P
         row[0] for row in second.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'roadmap%'")
     }
-    assert tables == {"roadmaps", "roadmap_versions", "roadmap_nodes", "roadmap_relations", "roadmap_todos"}
+    assert tables == {"roadmaps", "roadmap_versions", "roadmap_nodes", "roadmap_relations", "roadmap_todos", "roadmap_kanban_links", "roadmap_team_workers", "roadmap_readiness"}
     assert not (tmp_path / "roadmaps.db").exists()
     second.close()
 
@@ -443,7 +529,7 @@ def test_empty_and_whitespace_identifiers_and_actors_are_rejected(
     else:
         values = ["profile-a", "project-a", "roadmap-a", 1, "bad", None, "T", "open", 0, 1, 1]
         values[4] = value
-        sql = "INSERT INTO roadmap_todos VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        sql = "INSERT INTO roadmap_todos (profile_id, project_id, roadmap_id, version, todo_id, node_id, title, state, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(sql, values)
     conn.close()
@@ -484,7 +570,7 @@ def test_todos_reject_missing_node_and_cross_scope_node(tmp_path: Path) -> None:
     for node, profile in (("missing", "profile-a"), ("node-a", "profile-b")):
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute(
-                "INSERT INTO roadmap_todos VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO roadmap_todos (profile_id, project_id, roadmap_id, version, todo_id, node_id, title, state, position, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (profile, "project-a", "roadmap-a", 1, "todo-" + profile, node, "T", "open", 0, 1, 1),
             )
     conn.close()
