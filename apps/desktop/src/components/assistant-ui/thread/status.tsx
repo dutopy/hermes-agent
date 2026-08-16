@@ -54,14 +54,21 @@ const HintText: FC<{ children: ReactNode }> = ({ children }) => (
  *  session-scoped signal comes from that surface's view — a tile must never
  *  show the primary chat's compaction, prompt-wait, or turn timer. */
 function useThreadSessionStatus() {
-  const sessionId = useStore(useSessionView().$runtimeId)
+  const sessionView = useSessionView()
+  const sessionId = useStore(sessionView.$runtimeId)
   const turnStartedAt = useStore($turnStartedAt)
-  const compacting = useStore(useMemo(() => sessionCompacting(sessionId), [sessionId]))
-  const drafting = useStore(useMemo(() => sessionDraftingTool(sessionId), [sessionId]))
+  const compacting = useStore(
+    useMemo(() => sessionCompacting(sessionId, sessionView.profile), [sessionId, sessionView.profile])
+  )
+  const drafting = useStore(
+    useMemo(() => sessionDraftingTool(sessionId, sessionView.profile), [sessionId, sessionView.profile])
+  )
   // A pending clarify / approval / sudo / secret means the turn is paused on the
   // user, not working — so don't resurrect the "thinking" timer while they
   // decide (matches the pet's awaitingInput pose taking priority over busy).
-  const awaitingInput = useStore(useMemo(() => sessionAwaitingInput(sessionId), [sessionId]))
+  const awaitingInput = useStore(
+    useMemo(() => sessionAwaitingInput(sessionId, sessionView.profile), [sessionId, sessionView.profile])
+  )
 
   return {
     awaitingInput,

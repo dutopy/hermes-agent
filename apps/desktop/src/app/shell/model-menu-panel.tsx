@@ -113,7 +113,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
       markComposerSelectionManual()
       setCurrentReasoningEffort(next)
     } else if (activeSessionId) {
-      sessionTileDelegate()?.updateSession(activeSessionId, state => ({ ...state, reasoningEffort: next }))
+      sessionTileDelegate()?.updateSession(activeSessionId, state => ({ ...state, reasoningEffort: next }), profile)
     }
 
     // Preset-only without a session: the gateway's `config.set` falls back to
@@ -129,7 +129,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
       if (touchesPrimary) {
         setCurrentReasoningEffort(previous)
       } else {
-        sessionTileDelegate()?.updateSession(activeSessionId, state => ({ ...state, reasoningEffort: previous }))
+        sessionTileDelegate()?.updateSession(activeSessionId, state => ({ ...state, reasoningEffort: previous }), profile)
       }
 
       setModelPreset(provider, model, { effort: previous })
@@ -142,7 +142,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
       markComposerSelectionManual()
       setCurrentFastMode(enabled)
     } else if (activeSessionId) {
-      sessionTileDelegate()?.updateSession(activeSessionId, state => ({ ...state, fast: enabled }))
+      sessionTileDelegate()?.updateSession(activeSessionId, state => ({ ...state, fast: enabled }), profile)
     }
 
     if (!activeSessionId) {
@@ -159,7 +159,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
       if (touchesPrimary) {
         setCurrentFastMode(!enabled)
       } else {
-        sessionTileDelegate()?.updateSession(activeSessionId, state => ({ ...state, fast: !enabled }))
+        sessionTileDelegate()?.updateSession(activeSessionId, state => ({ ...state, fast: !enabled }), profile)
       }
 
       setModelPreset(provider, model, { fast: !enabled })
@@ -176,6 +176,7 @@ export function ModelMenuPanel({ gateway, onSelectModel, profile = 'default', re
       void applyModelPreset(preset, {
         failMessage: t.shell.modelOptions.updateFailed,
         primary: touchesPrimary,
+        profile,
         request: requestGateway,
         sessionId: activeSessionId
       })

@@ -3,8 +3,8 @@ import { atom, computed } from 'nanostores'
 import { stableRecord } from '@/lib/stable-array'
 import type { TodoItem } from '@/lib/todos'
 
-import { $sessions, lineageAliases } from './session'
-import { $sessionStates } from './session-states'
+import { $sessions, lineageAliases, sessionDurableStateKey } from './session'
+import { $sessionStates, sessionRuntimeStateIdentity, sessionRuntimeStateKey } from './session-states'
 
 /**
  * Live todo list per runtime session, rendered by the composer status stack
@@ -33,7 +33,7 @@ export const $todoProgressBySession = computed(
   (todosMap, states, sessions) => {
     const next: Record<string, string> = {}
 
-    for (const [runtimeId, todos] of Object.entries(todosMap)) {
+    for (const [runtimeKey, todos] of Object.entries(todosMap)) {
       const counted = todos.filter(t => t.status !== 'cancelled')
 
       if (counted.length === 0) {
@@ -42,8 +42,10 @@ export const $todoProgressBySession = computed(
 
       const progress = `${counted.filter(t => t.status === 'completed').length}/${counted.length}`
 
-      for (const alias of lineageAliases(states[runtimeId]?.storedSessionId ?? runtimeId, sessions)) {
-        next[alias] = progress
+      const { profile, runtimeSessionId } = sessionRuntimeStateIdentity(runtimeKey)
+
+      for (const alias of lineageAliases(states[runtimeKey]?.storedSessionId ?? runtimeSessionId, sessions, profile)) {
+        next[sessionDurableStateKey(profile, alias)] = progress
       }
     }
 
@@ -77,35 +79,37 @@ function cancelScheduledClear(sid: string) {
   }
 }
 
-export function setSessionTodos(sid: string, todos: TodoItem[]) {
+export function setSessionTodos(sid: string, todos: TodoItem[], profile?: null | string) {
   if (!sid) {
     return
   }
 
-  cancelScheduledClear(sid)
-  $todosBySession.set({ ...$todosBySession.get(), [sid]: todos })
+  const key = sessionRuntimeStateKey(profile, sid)
+  cancelScheduledClear(key)
+  $todosBySession.set({ ...$todosBySession.get(), [key]: todos })
 
   if (!todoListActive(todos)) {
     clearTimers.set(
-      sid,
+      key,
       setTimeout(() => {
-        clearTimers.delete(sid)
-        clearSessionTodos(sid)
+        clearTimers.delete(key)
+        clearSessionTodos(sid, profile)
       }, FINISHED_LINGER_MS)
     )
   }
 }
 
-export function clearSessionTodos(sid: string) {
-  cancelScheduledClear(sid)
+export function clearSessionTodos(sid: string, profile?: null | string) {
+  const key = sessionRuntimeStateKey(profile, sid)
+  cancelScheduledClear(key)
 
   const map = $todosBySession.get()
 
-  if (!(sid in map)) {
+  if (!(key in map)) {
     return
   }
 
-  const { [sid]: _drop, ...rest } = map
+  const { [key]: _drop, ...rest } = map
   $todosBySession.set(rest)
 }
 
@@ -114,12 +118,12 @@ export function clearSessionTodos(sid: string) {
 // update, so the "Tasks N/M" panel would otherwise stay pinned above the
 // composer forever. A finished list is left untouched so its short linger
 // still shows the last checkmark landing.
-export function clearActiveSessionTodos(sid: string) {
-  const todos = $todosBySession.get()[sid]
+export function clearActiveSessionTodos(sid: string, profile?: null | string) {
+  const todos = $todosBySession.get()[sessionRuntimeStateKey(profile, sid)]
 
   if (!todos || !todoListActive(todos)) {
     return
   }
 
-  clearSessionTodos(sid)
+  clearSessionTodos(sid, profile)
 }

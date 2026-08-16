@@ -2,6 +2,8 @@ import { atom } from 'nanostores'
 
 import { previewName } from '@/lib/preview-targets'
 
+import { sessionRuntimeStateKey } from './session-states'
+
 /**
  * Session-scoped feed of previewable artifacts (HTML files, localhost dev URLs)
  * a tool produced. Surfaced as compact links in the composer status stack —
@@ -24,22 +26,23 @@ const MAX_PER_SESSION = 4
 
 export const $previewStatusBySession = atom<Record<string, PreviewArtifact[]>>({})
 
-const writePreviews = (sid: string, items: PreviewArtifact[]) => {
+const writePreviews = (sid: string, items: PreviewArtifact[], profile?: null | string) => {
+  const key = sessionRuntimeStateKey(profile, sid)
   const current = $previewStatusBySession.get()
 
   if (items.length === 0) {
-    if (!current[sid]) {
+    if (!current[key]) {
       return
     }
 
     const next = { ...current }
-    delete next[sid]
+    delete next[key]
     $previewStatusBySession.set(next)
 
     return
   }
 
-  $previewStatusBySession.set({ ...current, [sid]: items })
+  $previewStatusBySession.set({ ...current, [key]: items })
 }
 
 /**
@@ -47,33 +50,34 @@ const writePreviews = (sid: string, items: PreviewArtifact[]) => {
  * in the list keeps its slot (the tool row re-registers on every render, so this
  * must not churn the atom or reorder rows).
  */
-export function recordPreviewArtifact(sid: string, target: string, cwd: string) {
+export function recordPreviewArtifact(sid: string, target: string, cwd: string, profile?: null | string) {
   const raw = target.trim()
 
   if (!sid || !raw) {
     return
   }
 
-  const list = $previewStatusBySession.get()[sid] ?? []
+  const list = $previewStatusBySession.get()[sessionRuntimeStateKey(profile, sid)] ?? []
 
   if (list.some(item => item.id === raw)) {
     return
   }
 
-  writePreviews(sid, [...list, { cwd, id: raw, label: previewName(raw), target: raw }].slice(-MAX_PER_SESSION))
+  writePreviews(sid, [...list, { cwd, id: raw, label: previewName(raw), target: raw }].slice(-MAX_PER_SESSION), profile)
 }
 
-export function dismissPreviewArtifact(sid: string, id: string) {
-  const list = $previewStatusBySession.get()[sid]
+export function dismissPreviewArtifact(sid: string, id: string, profile?: null | string) {
+  const list = $previewStatusBySession.get()[sessionRuntimeStateKey(profile, sid)]
 
   if (list) {
     writePreviews(
       sid,
-      list.filter(item => item.id !== id)
+      list.filter(item => item.id !== id),
+      profile
     )
   }
 }
 
-export function clearPreviewArtifacts(sid: string) {
-  writePreviews(sid, [])
+export function clearPreviewArtifacts(sid: string, profile?: null | string) {
+  writePreviews(sid, [], profile)
 }

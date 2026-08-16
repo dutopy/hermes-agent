@@ -3,6 +3,7 @@ import { useStore } from '@nanostores/react'
 import { type Translations, useI18n } from '@/i18n'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
+import { sessionDurableStateValue } from '@/store/session'
 import { $sessionColorById, sessionColorFor } from '@/store/session-color'
 import { $sessionDotStateById, type SessionDotState } from '@/store/session-dot-state'
 import type { SessionInfo } from '@/types/hermes'
@@ -98,6 +99,8 @@ export interface SessionStatusDotProps {
    *  Null on a new chat that has yet to reach the backend — no id to key by,
    *  and no turn behind it, which is the draft state by definition. */
   storedSessionId: null | string
+  /** Explicit owner when the caller has identity but no loaded session row. */
+  profile?: string
   /** The session row for color resolution — recents OR the project tree. Both
    *  call sites already hold it; passing it lets the idle dot inherit the
    *  project color even for a session older than the paginated recents page
@@ -119,7 +122,7 @@ export interface SessionStatusDotProps {
  * An idle session shows its project color; the active states own the dot with
  * their semantic color so an attention cue is never masked by the tint.
  */
-export function SessionStatusDot({ storedSessionId, session, branchStem, className }: SessionStatusDotProps) {
+export function SessionStatusDot({ storedSessionId, profile, session, branchStem, className }: SessionStatusDotProps) {
   const { t } = useI18n()
   const r = t.sidebar.row
 
@@ -131,7 +134,7 @@ export function SessionStatusDot({ storedSessionId, session, branchStem, classNa
   // Selector, not a plain useStore: the map is rebuilt whenever any session's
   // status changes, but a given dot only repaints when ITS OWN state flips.
   const dotState = useStoreSelector($sessionDotStateById, states =>
-    storedSessionId ? (states[storedSessionId] ?? 'idle') : 'draft'
+    storedSessionId ? (sessionDurableStateValue(states, profile ?? session?.profile, storedSessionId) ?? 'idle') : 'draft'
   )
 
   const variant = DOT_VARIANTS[dotState]

@@ -23,7 +23,13 @@
 
 import { setSessionPinnedRemote } from '@/hermes'
 import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
-import { $sessions, sessionMatchesStoredId, sessionPinId } from '@/store/session'
+import { normalizeProfileKey } from '@/store/profile'
+import {
+  $sessions,
+  sessionDurableStateIdentity,
+  sessionMatchesStoredId
+} from '@/store/session'
+import { sessionPinKeyForOwner } from '@/store/session-pins'
 
 // pin ids we've successfully PATCHed pinned=true this session.
 const mirrored = new Set<string>()
@@ -41,13 +47,19 @@ const unconfirmed = new Map<string, { at: number; value: boolean }>()
 // slow ones), short enough that a genuine server-side change still wins.
 const WRITE_GUARD_MS = 10_000
 
-function profileFor(pinId: string): null | string | undefined {
-  return $sessions.get().find(row => sessionMatchesStoredId(row, pinId))?.profile
+function rowForPinKey(pinKey: string) {
+  const identity = sessionDurableStateIdentity(pinKey)
+
+  return $sessions.get().find(
+    row =>
+      (identity.profile === null || normalizeProfileKey(row.profile) === identity.profile) &&
+      sessionMatchesStoredId(row, identity.storedSessionId)
+  )
 }
 
 /** PATCH the flag, guarding reads against pages that predate the write. */
-function writePin(id: string, pinned: boolean, profile?: null | string): Promise<void> {
-  unconfirmed.set(id, { at: Date.now(), value: pinned })
+function writePin(key: string, id: string, pinned: boolean, profile?: null | string): Promise<void> {
+  unconfirmed.set(key, { at: Date.now(), value: pinned })
 
   return setSessionPinnedRemote(id, pinned, profile).then(
     () => {
@@ -59,7 +71,7 @@ function writePin(id: string, pinned: boolean, profile?: null | string): Promise
     (err: unknown) => {
       // A failed write leaves the server on the old value, so the guard would
       // be fencing out the truth. Drop it and let the page win.
-      unconfirmed.delete(id)
+      unconfirmed.delete(key)
       throw err
     }
   )
@@ -85,15 +97,15 @@ function pullRemotePins(): void {
 
     // Pins are keyed on the durable lineage root so they survive compression
     // tip rotation; the row may surface under either identity.
-    const pinId = sessionPinId(row)
-    const heldLocally = local.has(pinId) || local.has(row.id)
+    const pinKey = sessionPinKeyForOwner(row.id, row.profile, [row])
+    const heldLocally = local.has(pinKey) || (row.profile == null && local.has(row.id))
 
     // A write of ours this page may predate. Confirmed (page agrees) → release
     // the guard, the server has caught up. Contradicted but still inside the
     // cooldown → the page was almost certainly issued before our PATCH, so our
     // write is newer: skip the row. Contradicted past the cooldown → no page
     // ever confirmed us, so stop fencing and let the server win.
-    const guardKey = unconfirmed.has(pinId) ? pinId : unconfirmed.has(row.id) ? row.id : null
+    const guardKey = unconfirmed.has(pinKey) ? pinKey : row.profile == null && unconfirmed.has(row.id) ? row.id : null
     const guard = guardKey ? unconfirmed.get(guardKey) : undefined
 
     if (guard && guardKey) {
@@ -108,21 +120,23 @@ function pullRemotePins(): void {
 
     // Local intent still waiting on its PATCH (row unresolved when the push
     // pass ran) is also newer than the page — never revert it.
-    if (pending.has(pinId) || pending.has(row.id)) {
+    if (pending.has(pinKey) || (row.profile == null && pending.has(row.id))) {
       continue
     }
 
     if (row.pinned && !heldLocally) {
       // Mark mirrored first: pinSession fires the pin listener synchronously,
       // and the nested reconcile must not see this as a new pin to PATCH.
-      mirrored.add(pinId)
-      pinSession(pinId)
+      mirrored.add(pinKey)
+      pinSession(pinKey)
     } else if (!row.pinned && heldLocally) {
       // Same discipline on the way down: forget the mirror before the nested
       // reconcile runs, or it re-PATCHes pinned=false the server already has.
-      mirrored.delete(pinId)
-      mirrored.delete(row.id)
-      unpinSession(local.has(pinId) ? pinId : row.id)
+      mirrored.delete(pinKey)
+      if (row.profile == null) {
+        mirrored.delete(row.id)
+      }
+      unpinSession(local.has(pinKey) ? pinKey : row.id)
     }
   }
 }
@@ -145,7 +159,9 @@ function reconcile(): void {
     if (!current.has(id)) {
       mirrored.delete(id)
       pending.delete(id)
-      void writePin(id, false, profileFor(id)).catch(() => {})
+      const identity = sessionDurableStateIdentity(id)
+      const profile = identity.profile ?? rowForPinKey(id)?.profile
+      void writePin(id, identity.storedSessionId, false, profile).catch(() => {})
     }
   }
 
@@ -159,7 +175,7 @@ function reconcile(): void {
   // Flush whatever we can resolve now; unresolved ids (row not loaded yet)
   // retry on the next $sessions change.
   for (const id of [...pending]) {
-    const row = $sessions.get().find(entry => sessionMatchesStoredId(entry, id))
+    const row = rowForPinKey(id)
 
     if (!row) {
       continue
@@ -167,7 +183,7 @@ function reconcile(): void {
 
     pending.delete(id)
     mirrored.add(id)
-    void writePin(id, true, row.profile).catch(() => {
+    void writePin(id, sessionDurableStateIdentity(id).storedSessionId, true, row.profile).catch(() => {
       // Let a later reconcile retry the mirror.
       mirrored.delete(id)
       pending.add(id)

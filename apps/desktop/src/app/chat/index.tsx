@@ -29,20 +29,20 @@ import { migrateQueuedPrompts, parkQueuedPrompts } from '@/store/composer-queue'
 import { $pinnedSessionIds } from '@/store/layout'
 import { $petActive } from '@/store/pet'
 import { $petOverlayActive } from '@/store/pet-overlay'
-import { $activeGatewayProfile, $gatewaySwapTarget, $profiles } from '@/store/profile'
+import { $activeGatewayProfile, $gatewaySwapTarget, $profiles, normalizeProfileKey } from '@/store/profile'
 import {
   $contextSuggestions,
   $freshDraftReady,
-  $gatewayState,
   $introPersonality,
   $introSeed,
   $resumeExhaustedSessionId,
   $sessions,
   resolveComposerSessionKey,
   sessionMatchesStoredId,
-  sessionPinId,
   shouldMigrateComposerScope
 } from '@/store/session'
+import { sessionPinKeyForOwner } from '@/store/session-pins'
+import { sessionTilePaneId } from '@/store/session-states'
 import { isAuxiliaryWindow, isWatchWindow } from '@/store/windows'
 import type { ModelOptionsResponse } from '@/types/hermes'
 
@@ -113,9 +113,16 @@ function ChatHeader({
   const sessions = useStore($sessions)
   const pinnedSessionIds = useStore($pinnedSessionIds)
   const profiles = useStore($profiles)
+  const activeGatewayProfile = useStore($activeGatewayProfile)
 
   const activeStoredSession =
-    (selectedSessionId && sessions.find(session => sessionMatchesStoredId(session, selectedSessionId))) || null
+    (selectedSessionId &&
+      sessions.find(
+        session =>
+          normalizeProfileKey(session.profile) === normalizeProfileKey(activeGatewayProfile) &&
+          sessionMatchesStoredId(session, selectedSessionId)
+      )) ||
+    null
 
   const title = activeStoredSession ? sessionTitle(activeStoredSession) : NEW_SESSION_TITLE
 
@@ -127,11 +134,10 @@ function ChatHeader({
   // Pins live on the durable lineage-root id, but selectedSessionId is the live
   // (tip) id — resolve through the loaded row so the menu reflects the pin
   // state after auto-compression rotates the id.
-  const selectedIsPinned = activeStoredSession
-    ? pinnedSessionIds.includes(sessionPinId(activeStoredSession))
-    : selectedSessionId
-      ? pinnedSessionIds.includes(selectedSessionId)
-      : false
+  const selectedPinKey = selectedSessionId
+    ? sessionPinKeyForOwner(selectedSessionId, activeGatewayProfile, sessions)
+    : null
+  const selectedIsPinned = selectedPinKey ? pinnedSessionIds.includes(selectedPinKey) : false
 
   // Secondary windows (new-session scratch, subagent watch, cmd-click pop-out)
   // are compact side panels — they drop the session-actions header + border
@@ -155,6 +161,7 @@ function ChatHeader({
           onDelete={selectedSessionId ? onDeleteSelectedSession : undefined}
           onPin={selectedSessionId ? onToggleSelectedPin : undefined}
           pinned={selectedIsPinned}
+          profile={activeStoredSession?.profile ?? activeGatewayProfile}
           sessionId={selectedSessionId || activeSessionId || ''}
           sideOffset={8}
           title={title}
@@ -319,7 +326,7 @@ export const ChatView = memo(function ChatView({
   const storedId = useStore(view.$storedId)
   // Dock anchor for a session drop onto this surface: the workspace pane for the
   // primary, this tile's pane id for a tile. Read by the session-drop bridge.
-  const sessionAnchor = isPrimary ? 'workspace' : `session-tile:${storedId ?? ''}`
+  const sessionAnchor = isPrimary ? 'workspace' : sessionTilePaneId(storedId ?? '', view.profile)
   const awaitingResponse = useStore(view.$awaitingResponse)
   const busy = useStore(view.$busy)
   const activeGatewayProfile = useStore($activeGatewayProfile)
@@ -334,9 +341,10 @@ export const ChatView = memo(function ChatView({
   const petOverlayActive = useStore($petOverlayActive)
   const petPresent = petActive || petOverlayActive
   const freshDraftReady = useStore($freshDraftReady)
-  const gatewayState = useStore($gatewayState)
+  const gatewayState = useStore(view.$gatewayState)
   const gatewaySwapTarget = useStore($gatewaySwapTarget)
   const gatewayOpen = gatewayState === 'open'
+  const ownerProfile = view.profile ?? activeGatewayProfile
   const introPersonality = useStore($introPersonality)
   const introSeed = useStore($introSeed)
   // PERF: ChatView must not subscribe to the view's $messages — the atom is
@@ -437,7 +445,7 @@ export const ChatView = memo(function ChatView({
   const threadKey = selectedSessionId || activeSessionId || (isRoutedSessionView ? location.pathname : 'new')
 
   const modelOptionsQuery = useQuery<ModelOptionsResponse>({
-    queryKey: modelOptionsQueryKey(activeGatewayProfile, activeSessionId),
+    queryKey: modelOptionsQueryKey(ownerProfile, activeSessionId),
     queryFn: () => requestModelOptions({ gateway: gateway || undefined, sessionId: activeSessionId }),
     enabled: gatewayOpen
   })
@@ -536,7 +544,7 @@ export const ChatView = memo(function ChatView({
       {/* Mounted for the primary AND every tile, each scoped to its own session
           so a tiled/background session's blocking prompt surfaces instead of
           stalling to timeout. */}
-      <PromptOverlays sessionId={activeSessionId} />
+      <PromptOverlays profile={view.profile} sessionId={activeSessionId} />
 
       <ChatRuntimeBoundary
         busy={busy}

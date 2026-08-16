@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 
 import { closeActiveTab } from '@/app/chat/close-tab'
 import { openSession } from '@/app/open-session'
-import { storedSessionIdForNotification } from '@/lib/session-ids'
+import { requestGatewayForProfile } from '@/store/gateway'
 import { respondToApprovalAction } from '@/store/native-notifications'
 import { openFolderAsProject } from '@/store/projects'
 import {
@@ -12,6 +12,7 @@ import {
   setRememberedRoute,
   setRememberedSessionId
 } from '@/store/session'
+import { $sessionStates, sessionRuntimeState } from '@/store/session-states'
 import { onSessionsChanged } from '@/store/session-sync'
 import { openUpdatesWindow, startUpdatePoller, stopUpdatePoller } from '@/store/updates'
 import { isHudWindow, isSecondaryWindow } from '@/store/windows'
@@ -21,6 +22,10 @@ import { requestComposerFocus, requestComposerInsert } from '../../chat/composer
 import { appViewForPath, isOverlayView, NEW_CHAT_ROUTE, routeSessionId, sessionRoute } from '../../routes'
 
 type RememberedSession = Pick<SessionInfo, '_lineage_root_id' | 'id' | 'profile'>
+
+interface LiveSessionBindingResponse {
+  sessions?: Array<{ id?: string; session_key?: string }>
+}
 
 interface DesktopIntegrationsParams {
   activeProfile: string
@@ -32,7 +37,6 @@ interface DesktopIntegrationsParams {
   refreshSessions: () => Promise<unknown> | unknown
   resumeExhaustedSessionId: null | string
   routedSessionId: null | string
-  runtimeIdByStoredSessionId: { readonly current: Map<string, string> }
   sessions: readonly RememberedSession[]
 }
 
@@ -51,7 +55,6 @@ export function useDesktopIntegrations({
   refreshSessions,
   resumeExhaustedSessionId,
   routedSessionId,
-  runtimeIdByStoredSessionId,
   sessions
 }: DesktopIntegrationsParams): void {
   // Update polling — populates $desktopVersion/$updateStatus, which feed the
@@ -170,18 +173,64 @@ export function useDesktopIntegrations({
   // on screen. Runtime id is translated to the stored id the chat route is
   // keyed by; action buttons resolve in place.
   useEffect(() => {
-    const unsubscribe = window.hermesDesktop?.onFocusSession?.(sessionId => {
-      if (sessionId) {
-        openSession(storedSessionIdForNotification(sessionId, runtimeIdByStoredSessionId.current), navigate, 'stack')
+    let cancelled = false
+
+    const unsubscribe = window.hermesDesktop?.onFocusSession?.(({ profile, sessionId }) => {
+      if (!sessionId) {
+        return
       }
+
+      // Omitted profile is the deliberate compatibility boundary: old native
+      // notifications carried a stored id in this field. Once an owner is
+      // explicit, however, the field is a runtime id and must never be opened
+      // as durable identity.
+      if (profile == null) {
+        openSession(sessionId, navigate, 'stack')
+
+        return
+      }
+
+      if (!profile.trim()) {
+        return
+      }
+
+      const projectedStoredId = sessionRuntimeState($sessionStates.get(), profile, sessionId)?.storedSessionId
+
+      if (projectedStoredId) {
+        openSession(projectedStoredId, navigate, 'stack', profile)
+
+        return
+      }
+
+      // Projection eviction must not turn a runtime id into a route. Ask the
+      // owning gateway for its read-only runtime→stored snapshot; an absent or
+      // failed binding is stale/unprovable, so the click safely does nothing.
+      void requestGatewayForProfile<LiveSessionBindingResponse>(profile, 'session.active_list', {})
+        .then(response => {
+          if (cancelled) {
+            return
+          }
+
+          const storedSessionId = response.sessions
+            ?.find(binding => binding.id?.trim() === sessionId)
+            ?.session_key?.trim()
+
+          if (storedSessionId) {
+            openSession(storedSessionId, navigate, 'stack', profile)
+          }
+        })
+        .catch(() => undefined)
     })
 
-    return () => unsubscribe?.()
-  }, [navigate, runtimeIdByStoredSessionId])
+    return () => {
+      cancelled = true
+      unsubscribe?.()
+    }
+  }, [navigate])
 
   useEffect(() => {
-    const unsubscribe = window.hermesDesktop?.onNotificationAction?.(({ actionId, sessionId }) => {
-      void respondToApprovalAction(sessionId ?? null, actionId)
+    const unsubscribe = window.hermesDesktop?.onNotificationAction?.(({ actionId, profile, sessionId }) => {
+      void respondToApprovalAction(sessionId ?? null, actionId, profile)
     })
 
     return () => unsubscribe?.()

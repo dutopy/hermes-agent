@@ -15,6 +15,7 @@ vi.mock('@/hermes', () => ({
 
 import { $pinnedSessionIds } from '@/store/layout'
 import { $sessions } from '@/store/session'
+import { sessionPinKeyForOwner } from '@/store/session-pins'
 
 import { resetSessionPinMirror, watchSessionPins } from './session-pin-sync'
 
@@ -85,6 +86,30 @@ describe('watchSessionPins', () => {
     await flush()
 
     expect(patch).toHaveBeenCalledWith('root', true, undefined)
+  })
+
+  it('mirrors homonymous qualified pins and unpins against only their owner profile', async () => {
+    const sessions = [
+      row('same', { _lineage_root_id: 'root', profile: 'profile-a' }),
+      row('same', { _lineage_root_id: 'root', profile: 'profile-b' })
+    ]
+    const aKey = sessionPinKeyForOwner('same', 'profile-a', sessions)
+    const bKey = sessionPinKeyForOwner('same', 'profile-b', sessions)
+    $sessions.set(sessions)
+    $pinnedSessionIds.set([aKey])
+    await flush()
+    patch.mockClear()
+
+    $pinnedSessionIds.set([aKey, bKey])
+    await flush()
+    expect(patch).toHaveBeenCalledWith('root', true, 'profile-b')
+    expect(patch).not.toHaveBeenCalledWith('root', true, 'profile-a')
+    patch.mockClear()
+
+    $pinnedSessionIds.set([aKey])
+    await flush()
+    expect(patch).toHaveBeenCalledWith('root', false, 'profile-b')
+    expect($pinnedSessionIds.get()).toEqual([aKey])
   })
 
   it('does not re-PATCH an already-mirrored pin on unrelated session updates', async () => {

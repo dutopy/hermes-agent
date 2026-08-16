@@ -16,10 +16,18 @@ import { persistentAtom } from '@/lib/persisted'
 import { $gateway, activeGateway, ensureActiveGatewayOpen } from '@/store/gateway'
 import { setSidebarAgentsGrouped } from '@/store/layout'
 import { notify } from '@/store/notifications'
-import { $activeGatewayProfile, $profileScope, ALL_PROFILES, requestFreshSession } from '@/store/profile'
+import {
+  $activeGatewayProfile,
+  $profileScope,
+  ALL_PROFILES,
+  normalizeProfileKey,
+  requestFreshSession
+} from '@/store/profile'
 import {
   $selectedStoredSessionId,
   $sessions,
+  sessionDurableStateIdentity,
+  sessionDurableStateKey,
   sessionMatchesStoredId,
   setSessions,
   workspaceCwdForNewSession
@@ -66,7 +74,7 @@ function projectsStaleBackendError(): Error {
 // refresh once the server snapshot has caught up.
 export const $removedSessionIds = atom<Set<string>>(new Set())
 
-export function tombstoneSessions(ids: Array<null | string | undefined>): void {
+export function tombstoneSessions(ids: Array<null | string | undefined>, profile?: null | string): void {
   const next = new Set($removedSessionIds.get())
   const before = next.size
 
@@ -74,7 +82,7 @@ export function tombstoneSessions(ids: Array<null | string | undefined>): void {
     const trimmed = id?.trim()
 
     if (trimmed) {
-      next.add(trimmed)
+      next.add(sessionDurableStateKey(profile, trimmed))
     }
   }
 
@@ -83,7 +91,7 @@ export function tombstoneSessions(ids: Array<null | string | undefined>): void {
   }
 }
 
-export function untombstoneSessions(ids: Array<null | string | undefined>): void {
+export function untombstoneSessions(ids: Array<null | string | undefined>, profile?: null | string): void {
   const current = $removedSessionIds.get()
 
   if (!current.size) {
@@ -96,7 +104,7 @@ export function untombstoneSessions(ids: Array<null | string | undefined>): void
     const trimmed = id?.trim()
 
     if (trimmed) {
-      next.delete(trimmed)
+      next.delete(sessionDurableStateKey(profile, trimmed))
     }
   }
 
@@ -109,27 +117,38 @@ export function untombstoneSessions(ids: Array<null | string | undefined>): void
 // against the projects.tree prune below: a refresh whose snapshot predates the
 // mutation completing must NOT drop the tombstone, or the row flashes back until
 // the backend catches up. Keyed by id, so concurrent deletes stay independent.
-export const $sessionMutationsInFlight = atom<Set<string>>(new Set())
+export const $sessionMutationsInFlight = atom<Map<string, number>>(new Map())
 
-function mutateInFlight(ids: Array<null | string | undefined>, add: boolean): void {
+function mutateInFlight(ids: Array<null | string | undefined>, delta: 1 | -1, profile?: null | string): void {
   const current = $sessionMutationsInFlight.get()
-  const next = new Set(current)
+  const next = new Map(current)
 
-  for (const id of ids) {
-    const trimmed = id?.trim()
+  const keys = new Set(
+    ids
+      .map(id => id?.trim())
+      .filter((id): id is string => Boolean(id))
+      .map(id => sessionDurableStateKey(profile, id))
+  )
 
-    if (trimmed) {
-      add ? next.add(trimmed) : next.delete(trimmed)
+  for (const key of keys) {
+    const count = (next.get(key) ?? 0) + delta
+
+    if (count > 0) {
+      next.set(key, count)
+    } else {
+      next.delete(key)
     }
   }
 
-  if (next.size !== current.size) {
+  if (next.size !== current.size || [...next].some(([key, count]) => current.get(key) !== count)) {
     $sessionMutationsInFlight.set(next)
   }
 }
 
-export const beginSessionMutation = (ids: Array<null | string | undefined>): void => mutateInFlight(ids, true)
-export const endSessionMutation = (ids: Array<null | string | undefined>): void => mutateInFlight(ids, false)
+export const beginSessionMutation = (ids: Array<null | string | undefined>, profile?: null | string): void =>
+  mutateInFlight(ids, 1, profile)
+export const endSessionMutation = (ids: Array<null | string | undefined>, profile?: null | string): void =>
+  mutateInFlight(ids, -1, profile)
 
 // True while the disk scan is in flight (drives the "finding repos" hint).
 export const $reposScanning = atom(false)
@@ -400,7 +419,7 @@ const PROJECT_TREE_REQUEST_TIMEOUT_MS = 60_000
 
 let projectTreeRefreshGeneration = 0
 
-function applyProjectTreePayload(res: ProjectTreePayload): void {
+function applyProjectTreePayload(res: ProjectTreePayload, profile?: null | string): void {
   const scoped = new Set(res.scoped_session_ids ?? [])
   $projectTree.set(res.projects ?? [])
   $activeProjectId.set(res.active_id ?? null)
@@ -411,7 +430,23 @@ function applyProjectTreePayload(res: ProjectTreePayload): void {
     // its side) OR while its mutation is still in flight locally — dropping it
     // early flashes the row back until the RPC lands.
     const inFlight = $sessionMutationsInFlight.get()
-    const pending = new Set([...tombstones].filter(id => scoped.has(id) || inFlight.has(id)))
+
+    const pending = new Set(
+      [...tombstones].filter(key => {
+        if (inFlight.has(key)) {
+          return true
+        }
+
+        const { profile: owner, storedSessionId } = sessionDurableStateIdentity(key)
+        const refreshedProfile = profile == null ? null : normalizeProfileKey(profile)
+
+        if (owner !== null && refreshedProfile !== null && owner !== refreshedProfile) {
+          return true
+        }
+
+        return scoped.has(storedSessionId)
+      })
+    )
 
     if (pending.size !== tombstones.size) {
       $removedSessionIds.set(pending)
@@ -419,7 +454,7 @@ function applyProjectTreePayload(res: ProjectTreePayload): void {
   }
 }
 
-async function refreshProjectTreeOn(gateway: HermesGateway): Promise<void> {
+async function refreshProjectTreeOn(gateway: HermesGateway, profile: string): Promise<void> {
   const generation = ++projectTreeRefreshGeneration
 
   if (activeGateway() === gateway) {
@@ -435,7 +470,7 @@ async function refreshProjectTreeOn(gateway: HermesGateway): Promise<void> {
       return
     }
 
-    applyProjectTreePayload(res)
+    applyProjectTreePayload(res, profile)
     markProjectsRpcSuccess()
   } catch (err) {
     if (activeGateway() === gateway) {
@@ -459,8 +494,8 @@ export async function refreshProjectTree(): Promise<void> {
   }
 
   try {
-    const { gateway } = await activeProjectsContext()
-    await refreshProjectTreeOn(gateway)
+    const { gateway, profile } = await activeProjectsContext()
+    await refreshProjectTreeOn(gateway, profile)
   } catch {
     // Backend may not be ready; keep the last known tree.
   }

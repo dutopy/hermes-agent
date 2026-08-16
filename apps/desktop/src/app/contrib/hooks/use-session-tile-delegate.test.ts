@@ -2,18 +2,23 @@ import { renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type * as HermesModule from '@/hermes'
-import { setSessions } from '@/store/session'
-import { sessionTileDelegate } from '@/store/session-states'
+import { createClientSessionState } from '@/lib/chat-runtime'
+import { $activeSessionId, setActiveSessionId, setSessions } from '@/store/session'
+import { sessionRuntimeStateKey, sessionTileDelegate } from '@/store/session-states'
 import type { SessionInfo } from '@/types/hermes'
 
-import { useSessionTileDelegate } from './use-session-tile-delegate'
+import { reclaimSessionSurfaceRuntime, useSessionTileDelegate } from './use-session-tile-delegate'
 
 vi.mock('@/hermes', async importActual => ({
   ...(await importActual<typeof HermesModule>()),
   getLatestSessionMessages: vi.fn(async () => ({ messages: [], session_id: '' }))
 }))
+vi.mock('@/store/gateway', () => ({
+  requestGatewayForProfile: vi.fn()
+}))
 
 const { getLatestSessionMessages } = await import('@/hermes')
+const { requestGatewayForProfile } = await import('@/store/gateway')
 
 const row = (over: Partial<SessionInfo>): SessionInfo =>
   ({
@@ -52,6 +57,7 @@ describe('useSessionTileDelegate resumeTile', () => {
   beforeEach(() => {
     setSessions([])
     vi.mocked(getLatestSessionMessages).mockClear()
+    vi.mocked(requestGatewayForProfile).mockReset()
   })
 
   afterEach(() => {
@@ -65,38 +71,266 @@ describe('useSessionTileDelegate resumeTile', () => {
     // both the transcript prefetch and the resume RPC.
     setSessions([row({ id: 'stored-x', profile: 'ai-engineer' })])
 
-    const requestGateway = vi.fn(async (method: string) =>
-      method === 'session.resume' ? ({ session_id: 'runtime-1' } as never) : ({} as never)
-    )
+    vi.mocked(requestGatewayForProfile).mockResolvedValueOnce({ session_id: 'runtime-1' })
+    const requestGateway = vi.fn()
 
     renderTile(requestGateway)
     const runtimeId = await sessionTileDelegate()!.resumeTile('stored-x')
 
     expect(runtimeId).toBe('runtime-1')
     expect(getLatestSessionMessages).toHaveBeenCalledWith('stored-x', 'ai-engineer')
-    expect(requestGateway).toHaveBeenCalledWith('session.resume', {
+    expect(requestGatewayForProfile).toHaveBeenCalledWith('ai-engineer', 'session.resume', {
       session_id: 'stored-x',
       cols: 96,
       profile: 'ai-engineer',
       omit_messages: true
     })
+    expect(requestGateway).not.toHaveBeenCalled()
   })
 
   it('resolves and carries a default-profile session explicitly', async () => {
     setSessions([row({ id: 'stored-y', profile: 'default' })])
 
-    const requestGateway = vi.fn(async (method: string) =>
-      method === 'session.resume' ? ({ session_id: 'runtime-2' } as never) : ({} as never)
-    )
+    vi.mocked(requestGatewayForProfile).mockResolvedValueOnce({ session_id: 'runtime-2' })
+    const requestGateway = vi.fn()
 
     renderTile(requestGateway)
     await sessionTileDelegate()!.resumeTile('stored-y')
 
-    expect(requestGateway).toHaveBeenCalledWith('session.resume', {
+    expect(requestGatewayForProfile).toHaveBeenCalledWith('default', 'session.resume', {
       session_id: 'stored-y',
       cols: 96,
       profile: 'default',
       omit_messages: true
     })
+  })
+})
+
+describe('useSessionTileDelegate SessionSurface isolation', () => {
+  beforeEach(() => {
+    vi.mocked(requestGatewayForProfile).mockReset()
+  })
+
+  it('validates a runtime hint on its owner socket before adopting it', async () => {
+    vi.mocked(requestGatewayForProfile).mockResolvedValue({ output: 'Hermes TUI Status\n\nSession ID: stored-safe' })
+    const requestGateway = vi.fn()
+    renderTile(requestGateway)
+
+    await expect(
+      sessionTileDelegate()!.adoptSurface({
+        profile: 'work',
+        runtimeSessionId: 'runtime-safe',
+        storedSessionId: 'stored-safe'
+      })
+    ).resolves.toBe('runtime-safe')
+
+    expect(requestGatewayForProfile).toHaveBeenCalledWith('work', 'session.status', {
+      session_id: 'runtime-safe'
+    })
+    expect(requestGateway).not.toHaveBeenCalled()
+  })
+
+  it('rejects a stale or cross-profile runtime hint before exposing it', async () => {
+    vi.mocked(requestGatewayForProfile).mockResolvedValue({ output: 'Hermes TUI Status\n\nSession ID: stored-other' })
+    renderTile(vi.fn())
+
+    await expect(
+      sessionTileDelegate()!.adoptSurface({
+        profile: 'work',
+        runtimeSessionId: 'runtime-collision',
+        storedSessionId: 'stored-safe'
+      })
+    ).rejects.toThrow('Session surface identity mismatch')
+  })
+
+  it('classifies a missing hinted runtime as stale for bounded durable recovery', async () => {
+    vi.mocked(requestGatewayForProfile).mockRejectedValue(new Error('4007 Session not found'))
+    renderTile(vi.fn())
+
+    await expect(
+      sessionTileDelegate()!.adoptSurface({
+        profile: 'work',
+        runtimeSessionId: 'runtime-gone',
+        storedSessionId: 'stored-safe'
+      })
+    ).rejects.toMatchObject({ name: 'StaleSessionSurfaceRuntimeError' })
+  })
+
+  it('drops a previously adopted cache entry before durable recovery', async () => {
+    const sessionStateByRuntimeIdRef = { current: new Map<string, ReturnType<typeof createClientSessionState>>() }
+    let statusAttempts = 0
+
+    vi.mocked(requestGatewayForProfile).mockImplementation(async (_profile, method) => {
+      if (method === 'session.status') {
+        statusAttempts += 1
+
+        if (statusAttempts === 1) {
+          return { output: 'Hermes TUI Status\n\nSession ID: stored-work' } as never
+        }
+
+        throw new Error('4007 Session not found')
+      }
+
+      if (method === 'session.resume') {
+        return { session_id: 'runtime-fresh' } as never
+      }
+
+      return {} as never
+    })
+
+    renderHook(() =>
+      useSessionTileDelegate({
+        archiveSession: vi.fn(async () => undefined),
+        branchStoredSession: vi.fn(async () => undefined),
+        executeSlashCommand: vi.fn(async () => undefined) as never,
+        removeSession: vi.fn(async () => undefined),
+        requestGateway: vi.fn() as never,
+        runtimeIdByStoredSessionIdRef: { current: new Map() },
+        sessionStateByRuntimeIdRef: sessionStateByRuntimeIdRef as never,
+        updateSessionState: ((runtimeId: string, updater: (state: ReturnType<typeof createClientSessionState>) => ReturnType<typeof createClientSessionState>, storedSessionId?: string, profile?: string) => {
+          const key = sessionRuntimeStateKey(profile, runtimeId)
+          const next = updater(sessionStateByRuntimeIdRef.current.get(key) ?? createClientSessionState())
+          sessionStateByRuntimeIdRef.current.set(key, { ...next, storedSessionId: storedSessionId ?? null })
+
+          return next
+        }) as never
+      })
+    )
+
+    const identity = { profile: 'work', runtimeSessionId: 'runtime-old', storedSessionId: 'stored-work' }
+    await expect(sessionTileDelegate()!.adoptSurface(identity)).resolves.toBe('runtime-old')
+    await expect(sessionTileDelegate()!.adoptSurface(identity)).rejects.toMatchObject({
+      name: 'StaleSessionSurfaceRuntimeError'
+    })
+
+    await expect(sessionTileDelegate()!.resumeSurface(identity)).resolves.toBe('runtime-fresh')
+    expect(requestGatewayForProfile).toHaveBeenCalledWith('work', 'session.resume', expect.any(Object))
+  })
+
+  it('does not classify an authorization failure as a stale hinted runtime', async () => {
+    vi.mocked(requestGatewayForProfile).mockRejectedValue(new Error('403 forbidden'))
+    renderTile(vi.fn())
+
+    await expect(
+      sessionTileDelegate()!.adoptSurface({
+        profile: 'work',
+        runtimeSessionId: 'runtime-private',
+        storedSessionId: 'stored-safe'
+      })
+    ).rejects.not.toMatchObject({ name: 'StaleSessionSurfaceRuntimeError' })
+  })
+
+  it('resumes through the profile-bound requester rather than the foreground requester', async () => {
+    vi.mocked(requestGatewayForProfile).mockResolvedValue({ session_id: 'runtime-work' })
+    const requestGateway = vi.fn()
+    renderTile(requestGateway)
+
+    await expect(
+      sessionTileDelegate()!.resumeSurface({ profile: 'work', storedSessionId: 'stored-work' })
+    ).resolves.toBe('runtime-work')
+
+    expect(requestGatewayForProfile).toHaveBeenCalledWith('work', 'session.resume', {
+      session_id: 'stored-work',
+      cols: 96,
+      omit_messages: true,
+      profile: 'work'
+    })
+    expect(requestGateway).not.toHaveBeenCalled()
+  })
+
+  it('purges the durable surface binding after archive so reopening cannot republish discarded runtime state', async () => {
+    const stateByRuntime = { current: new Map<string, ReturnType<typeof createClientSessionState>>() }
+    const archiveSession = vi.fn(async () => undefined)
+    const resumed = ['runtime-archived', 'runtime-fresh']
+
+    vi.mocked(requestGatewayForProfile).mockImplementation(async (_profile, method) =>
+      method === 'session.resume' ? ({ session_id: resumed.shift() } as never) : ({} as never)
+    )
+    renderHook(() =>
+      useSessionTileDelegate({
+        archiveSession,
+        branchStoredSession: vi.fn(async () => undefined),
+        executeSlashCommand: vi.fn(async () => undefined) as never,
+        removeSession: vi.fn(async () => undefined),
+        requestGateway: vi.fn() as never,
+        runtimeIdByStoredSessionIdRef: { current: new Map() },
+        sessionStateByRuntimeIdRef: stateByRuntime as never,
+        updateSessionState: ((runtimeId: string, updater: (state: ReturnType<typeof createClientSessionState>) => ReturnType<typeof createClientSessionState>, storedSessionId?: string, profile?: string) => {
+          const key = sessionRuntimeStateKey(profile, runtimeId)
+          const next = { ...updater(stateByRuntime.current.get(key) ?? createClientSessionState()), storedSessionId: storedSessionId ?? null }
+          stateByRuntime.current.set(key, next)
+
+          return next
+        }) as never
+      })
+    )
+
+    await expect(sessionTileDelegate()!.resumeSurface({ profile: 'work', storedSessionId: 'stored-work' })).resolves.toBe(
+      'runtime-archived'
+    )
+    await sessionTileDelegate()!.archiveSession('stored-work', 'work')
+    await expect(sessionTileDelegate()!.resumeSurface({ profile: 'work', storedSessionId: 'stored-work' })).resolves.toBe(
+      'runtime-fresh'
+    )
+
+    expect(archiveSession).toHaveBeenCalledWith('stored-work', 'work')
+    expect(requestGatewayForProfile).toHaveBeenCalledTimes(2)
+  })
+
+  it('evicts a reclaimed surface runtime so remount resumes authoritatively without global activation', async () => {
+    const runtimeIdByStoredSessionIdRef = { current: new Map<string, string>() }
+    const sessionStateByRuntimeIdRef = { current: new Map<string, ReturnType<typeof createClientSessionState>>() }
+    const requestGateway = vi.fn()
+    const resumedRuntimeIds = ['runtime-reclaimed', 'runtime-fresh']
+
+    vi.mocked(requestGatewayForProfile).mockImplementation(async (_profile, method) => {
+      if (method === 'session.resume') {
+        return { session_id: resumedRuntimeIds.shift() ?? null } as never
+      }
+
+      return {} as never
+    })
+
+    renderHook(() =>
+      useSessionTileDelegate({
+        archiveSession: vi.fn(async () => undefined),
+        branchStoredSession: vi.fn(async () => undefined),
+        executeSlashCommand: vi.fn(async () => undefined) as never,
+        removeSession: vi.fn(async () => undefined),
+        requestGateway: requestGateway as never,
+        runtimeIdByStoredSessionIdRef,
+        sessionStateByRuntimeIdRef: sessionStateByRuntimeIdRef as never,
+        updateSessionState: ((runtimeId: string, updater: (state: ReturnType<typeof createClientSessionState>) => ReturnType<typeof createClientSessionState>, storedSessionId?: string, profile?: string) => {
+          const key = sessionRuntimeStateKey(profile, runtimeId)
+          const previous = sessionStateByRuntimeIdRef.current.get(key) ?? createClientSessionState()
+          const next = updater(previous)
+
+          sessionStateByRuntimeIdRef.current.set(key, { ...next, storedSessionId: storedSessionId ?? null })
+
+          return next
+        }) as never
+      })
+    )
+
+    setActiveSessionId('global-primary-runtime')
+
+    await expect(
+      sessionTileDelegate()!.resumeSurface({ profile: 'work', storedSessionId: 'stored-work' })
+    ).resolves.toBe('runtime-reclaimed')
+
+    expect(reclaimSessionSurfaceRuntime('work', 'runtime-reclaimed')).toBe(true)
+    expect(sessionStateByRuntimeIdRef.current.has(sessionRuntimeStateKey('work', 'runtime-reclaimed'))).toBe(false)
+
+    // The embedded SessionSurface unmounts/remounts here; its next resume must
+    // not reuse the dead local binding that existed before session.reclaimed.
+    await expect(
+      sessionTileDelegate()!.resumeSurface({ profile: 'work', storedSessionId: 'stored-work' })
+    ).resolves.toBe('runtime-fresh')
+
+    expect(requestGatewayForProfile).toHaveBeenCalledTimes(2)
+    expect(requestGateway).not.toHaveBeenCalled()
+    expect($activeSessionId.get()).toBe('global-primary-runtime')
+
+    setActiveSessionId(null)
   })
 })

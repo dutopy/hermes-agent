@@ -35,7 +35,7 @@ import { $billingSettingsRequest } from '@/store/billing-block'
 import { $desktopBoot } from '@/store/boot'
 import { requestVoiceConversationStart } from '@/store/composer'
 import { $cronReviewRequest, setCronFocusJobId } from '@/store/cron'
-import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
+import { restoreWorktree } from '@/store/layout'
 import { $previewTarget } from '@/store/preview'
 import {
   $activeGatewayProfile,
@@ -60,11 +60,11 @@ import {
   $selectedStoredSessionId,
   $sessions,
   sessionMatchesStoredId,
-  sessionPinId,
   setAwaitingResponse,
   setBusy,
   setMessages
 } from '@/store/session'
+import { toggleSessionPinForOwner } from '@/store/session-pins'
 import { clearSessionTodos, setSessionTodos, todosForHydration } from '@/store/todos'
 import { armWakeWord, stopClientCapture } from '@/store/wake-word'
 import { isAuxiliaryWindow, isHudWindow } from '@/store/windows'
@@ -91,6 +91,7 @@ import {
   CRON_ROUTE,
   navigateToWorkspacePage,
   routeSessionId,
+  routeSessionProfile,
   sessionRoute,
   SETTINGS_ROUTE,
   syncWorkspaceRoute
@@ -206,6 +207,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const boot = useStore($desktopBoot)
 
   const routedSessionId = routeSessionId(location.pathname)
+  const routedSessionProfile = routeSessionProfile(location.search)
   const routedSessionIdRef = useRef(routedSessionId)
 
   routedSessionIdRef.current = routedSessionId
@@ -335,13 +337,15 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     async (
       attempts = 1,
       storedSessionId = selectedStoredSessionIdRef.current,
-      runtimeSessionId = activeSessionIdRef.current
+      runtimeSessionId = activeSessionIdRef.current,
+      profile?: string
     ) => {
       if (!storedSessionId || !runtimeSessionId) {
         return
       }
 
-      const storedProfile = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))?.profile
+      const storedProfile =
+        profile ?? $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))?.profile
 
       for (let index = 0; index < Math.max(1, attempts); index += 1) {
         try {
@@ -350,15 +354,16 @@ export function ContribWiring({ children }: { children: ReactNode }) {
           updateSessionState(
             runtimeSessionId,
             state => ({ ...state, messages: preserveLocalAssistantErrors(messages, state.messages) }),
-            storedSessionId
+            storedSessionId,
+            storedProfile
           )
 
           const restored = todosForHydration(latestSessionTodos(messages))
 
           if (restored) {
-            setSessionTodos(runtimeSessionId, restored)
+            setSessionTodos(runtimeSessionId, restored, storedProfile)
           } else {
-            clearSessionTodos(runtimeSessionId)
+            clearSessionTodos(runtimeSessionId, storedProfile)
           }
 
           return
@@ -692,6 +697,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     resumeFailedSessionId,
     resumeExhaustedSessionId,
     routedSessionId,
+    routedSessionProfile,
     runtimeIdByStoredSessionIdRef,
     selectedStoredSessionId,
     selectedStoredSessionIdRef,
@@ -807,7 +813,6 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     refreshSessions,
     resumeExhaustedSessionId,
     routedSessionId,
-    runtimeIdByStoredSessionId: runtimeIdByStoredSessionIdRef,
     sessions
   })
 
@@ -820,14 +825,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       return
     }
 
-    const session = $sessions.get().find(s => sessionMatchesStoredId(s, sessionId))
-    const pinId = session ? sessionPinId(session) : sessionId
-
-    if ($pinnedSessionIds.get().includes(pinId)) {
-      unpinSession(pinId)
-    } else {
-      pinSession(pinId)
-    }
+    toggleSessionPinForOwner(sessionId, $activeGatewayProfile.get(), $sessions.get())
   }, [])
 
   // The tab-strip "+" and ⌘T share one action: open a new session as its own
@@ -876,12 +874,12 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const nextActions: WiringActions = {
     onAddContextRef: composer.addContextRefAttachment,
     onAddUrl: url => composer.addContextRefAttachment(`@url:${formatRefValue(url)}`, url),
-    onArchiveSession: sessionId => void archiveSession(sessionId),
+    onArchiveSession: (sessionId, profile) => void archiveSession(sessionId, profile),
     onAttachDroppedItems: composer.attachDroppedItems,
     onAttachImageBlob: composer.attachImageBlob,
     onAttachPrCommentUrl: composer.attachPrCommentUrl,
     onBranchInNewChat: messageId => void branchInNewChat(messageId),
-    onBranchSession: sessionId => void branchStoredSession(sessionId),
+    onBranchSession: (sessionId, profile) => void branchStoredSession(sessionId, profile),
     onCancel: cancelRun,
     onDeleteSelectedSession: () => {
       const id = $selectedStoredSessionId.get()
@@ -890,7 +888,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
         void removeSession(id)
       }
     },
-    onDeleteSession: sessionId => void removeSession(sessionId),
+    onDeleteSession: (sessionId, profile) => void removeSession(sessionId, profile),
     onDismissError: dismissError,
     onEdit: editMessage,
     onLoadMoreMessaging: loadMoreMessagingForPlatform,
@@ -911,7 +909,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     onRestoreToMessage: restoreToMessage,
     // Already on screen (open tile, or the main session)? Jump to its tab;
     // otherwise load it into main. Same door every other session link uses.
-    onResumeSession: sessionId => openSession(sessionId, navigate),
+    onResumeSession: (sessionId, profile) => openSession(sessionId, navigate, 'in-place', profile),
     onRetryResume: sessionId => void resumeSession(sessionId, true),
     onSteer: steerPrompt,
     onSubmit: submitText,

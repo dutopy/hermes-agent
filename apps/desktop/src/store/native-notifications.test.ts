@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { $gateway } from './gateway'
+import { $gateway, requestGatewayForProfile } from './gateway'
 import {
   dispatchNativeNotification,
   dispatchPluginNativeNotification,
@@ -11,6 +11,7 @@ import {
   setNativeNotifyKind
 } from './native-notifications'
 import { __resetNativeNotifyBaselineForTests, markNativeNotifyBaseline } from './notify-baseline'
+import { $activeGatewayProfile } from './profile'
 import { $approvalRequest, setApprovalRequest } from './prompts'
 import { $activeSessionId, setActiveSessionId } from './session'
 
@@ -18,6 +19,11 @@ const desktopWindow = window as unknown as { hermesDesktop?: Window['hermesDeskt
 const initialHermesDesktop = desktopWindow.hermesDesktop
 
 const notify = vi.fn().mockResolvedValue(true)
+
+vi.mock('./gateway', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  requestGatewayForProfile: vi.fn()
+}))
 
 function setWindowState({ focused = true, hidden = false }: { focused?: boolean; hidden?: boolean }) {
   Object.defineProperty(document, 'hidden', { configurable: true, value: hidden })
@@ -44,6 +50,7 @@ beforeEach(() => {
   }
 
   setActiveSessionId(null)
+  $activeGatewayProfile.set('default')
   setWindowState({ focused: false, hidden: true })
   __resetNativeNotifyBaselineForTests()
 })
@@ -133,11 +140,24 @@ describe('dispatchNativeNotification preferences', () => {
     expect(notify).toHaveBeenCalledTimes(1)
   })
 
-  it('forwards kind and sessionId to the bridge', () => {
+  it('forwards kind, profile, and sessionId to the bridge', () => {
+    $activeGatewayProfile.set('profile-b')
     setActiveSessionId('abc')
-    dispatchNativeNotification({ body: 'hi', kind: 'turnError', sessionId: 'abc', title: 'boom' })
+    dispatchNativeNotification({
+      body: 'hi',
+      kind: 'backgroundDone',
+      profile: 'profile-b',
+      sessionId: 'abc',
+      title: 'done'
+    })
     expect(notify).toHaveBeenCalledWith(
-      expect.objectContaining({ body: 'hi', kind: 'turnError', sessionId: 'abc', title: 'boom' })
+      expect.objectContaining({
+        body: 'hi',
+        kind: 'backgroundDone',
+        profile: 'profile-b',
+        sessionId: 'abc',
+        title: 'done'
+      })
     )
   })
 })
@@ -230,6 +250,8 @@ describe('respondToApprovalAction', () => {
 
   beforeEach(() => {
     request.mockClear()
+    vi.mocked(requestGatewayForProfile).mockReset()
+    vi.mocked(requestGatewayForProfile).mockResolvedValue({ resolved: true })
     $gateway.set({ request } as unknown as ReturnType<typeof $gateway.get>)
   })
 
@@ -250,6 +272,45 @@ describe('respondToApprovalAction', () => {
   it('rejects via approval.respond {choice: "deny"}', async () => {
     await respondToApprovalAction('bg', 'reject')
     expect(request).toHaveBeenCalledWith('approval.respond', { choice: 'deny', session_id: 'bg' })
+  })
+
+  it('routes an older notification action by its own profile when runtime ids collide', async () => {
+    const sessionId = freshSession()
+
+    dispatchNativeNotification({
+      actions: [{ id: 'approve', text: 'Run' }],
+      kind: 'approval',
+      profile: 'profile-a',
+      sessionId,
+      title: 'A'
+    })
+    dispatchNativeNotification({
+      actions: [{ id: 'approve', text: 'Run' }],
+      kind: 'approval',
+      profile: 'profile-b',
+      sessionId,
+      title: 'B'
+    })
+
+    const olderNotification = notify.mock.calls[0]?.[0] as { profile?: string; sessionId?: string }
+    await respondToApprovalAction(olderNotification.sessionId ?? null, 'approve', olderNotification.profile)
+
+    expect(olderNotification.profile).toBe('profile-a')
+    expect(requestGatewayForProfile).toHaveBeenCalledWith('profile-a', 'approval.respond', {
+      choice: 'once',
+      session_id: sessionId
+    })
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('reconnects the notification owner instead of falling back to active A', async () => {
+    await respondToApprovalAction('shared-runtime', 'approve', 'profile-b')
+
+    expect(requestGatewayForProfile).toHaveBeenCalledWith('profile-b', 'approval.respond', {
+      choice: 'once',
+      session_id: 'shared-runtime'
+    })
+    expect(request).not.toHaveBeenCalled()
   })
 
   it('ignores unknown action ids', async () => {

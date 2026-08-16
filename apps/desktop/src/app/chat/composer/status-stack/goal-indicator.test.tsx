@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider } from '@/i18n'
 import { $goalsBySession, type SessionGoal } from '@/store/goals'
+import { sessionRuntimeStateKey } from '@/store/session-states'
 
 import { ComposerStatusStack } from './index'
 
@@ -25,11 +26,11 @@ const goal = (status: SessionGoal['status'], title = 'ship the feature', detail?
   updatedAt: Date.now()
 })
 
-function renderStack(sessionId: null | string = SID) {
+function renderStack(sessionId: null | string = SID, profile?: string) {
   return render(
     <MemoryRouter>
       <I18nProvider configClient={null} initialLocale="en">
-        <ComposerStatusStack queue={null} sessionId={sessionId} />
+        <ComposerStatusStack profile={profile} queue={null} sessionId={sessionId} />
       </I18nProvider>
     </MemoryRouter>
   )
@@ -83,5 +84,19 @@ describe('ComposerStatusStack goal indicator', () => {
     const view = renderStack()
 
     expect(view.container.firstChild).toBeNull()
+  })
+
+  it('renders only the owning profile goal without a bare-key fallback for surfaces', () => {
+    $goalsBySession.set({
+      [SID]: goal('active', 'legacy goal'),
+      [sessionRuntimeStateKey('profile-a', SID)]: goal('active', 'profile A goal'),
+      [sessionRuntimeStateKey('profile-b', SID)]: goal('active', 'profile B goal')
+    })
+
+    renderStack(SID, 'profile-b')
+
+    expect(screen.getByText('profile B goal')).toBeTruthy()
+    expect(screen.queryByText('profile A goal')).toBeNull()
+    expect(screen.queryByText('legacy goal')).toBeNull()
   })
 })

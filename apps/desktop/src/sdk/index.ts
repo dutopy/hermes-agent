@@ -23,7 +23,7 @@ import { atom, type ReadableAtom } from 'nanostores'
 import { openSession, type OpenSessionIntent } from '@/app/open-session'
 import { $narrowViewport } from '@/components/pane-shell/tree/store'
 import { onGatewayEvent } from '@/contrib/events'
-import { getLogs, getStatus } from '@/hermes'
+import { getAllSessionMessages, getLogs, getStatus, type SessionMessagesResponse } from '@/hermes'
 import { $gateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
 import { $activeGatewayProfile, ensureGatewayProfile, newSessionInProfile, setShowAllProfiles } from '@/store/profile'
@@ -33,6 +33,32 @@ import { runGatewayRestart } from '@/store/system-actions'
 // -- state: readonly views over the app's live atoms -------------------------
 
 const readonlyAtom = <T>(atomLike: ReadableAtom<T>): ReadableAtom<T> => atomLike
+
+function validExplicitIdentity(value: string): boolean {
+  if (value.trim().length === 0) {
+    return false
+  }
+
+  for (const character of value) {
+    const code = character.codePointAt(0)
+
+    if (code === undefined || code < 32 || code === 127) {
+      return false
+    }
+  }
+
+  return true
+}
+
+/** Read the complete persisted transcript for an explicitly-owned profile.
+ * This never resumes, opens, or foregrounds the session. */
+export function readStoredSessionMessages(profile: string, storedSessionId: string): Promise<SessionMessagesResponse> {
+  if (!validExplicitIdentity(profile) || !validExplicitIdentity(storedSessionId)) {
+    return Promise.reject(new Error('Invalid stored session identity'))
+  }
+
+  return getAllSessionMessages(storedSessionId, profile)
+}
 
 /** Window geometry + the app's responsive posture, one readonly rect. */
 export interface ViewportRect {
@@ -121,7 +147,8 @@ export const host = {
           window.location.hash = target
         }
       },
-      options.intent ?? 'in-place'
+      options.intent ?? 'in-place',
+      profile || undefined
     )
   },
 
@@ -163,6 +190,9 @@ export const host = {
 // commands, routes, themes, panes, composer extensions, and bar items with
 // the same area ids + payload types core uses.
 export { COMPOSER_AREAS, type ComposerAttachmentProvider, type ComposerMiddleware } from '@/app/chat/composer/contrib'
+
+/** Native transcript + composer surface scoped to an explicit durable session. */
+export { SessionSurface, type SessionSurfaceIdentity, type SessionSurfaceProps } from '@/app/chat/session-surface'
 
 // -- ui: the design language --------------------------------------------------
 

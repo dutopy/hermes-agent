@@ -7,6 +7,7 @@ import { onComposerInsertRequest } from '@/app/chat/composer/focus'
 import { I18nProvider } from '@/i18n'
 import { clearClarifyRequest, setClarifyRequest } from '@/store/clarify'
 import { $gateway } from '@/store/gateway'
+import { notifyPromptResponseError } from '@/store/notifications'
 import { $activeSessionId } from '@/store/session'
 
 import { ClarifyTool, readClarifyResult } from './clarify-tool'
@@ -16,6 +17,7 @@ import { ClarifyTool, readClarifyResult } from './clarify-tool'
 vi.mock('@assistant-ui/react', () => ({
   useAuiState: () => true
 }))
+vi.mock('@/store/notifications', () => ({ notifyError: vi.fn(), notifyPromptResponseError: vi.fn() }))
 
 afterEach(() => {
   cleanup()
@@ -294,6 +296,26 @@ describe('ClarifyTool keyboard navigation', () => {
     expect(fireEvent.keyDown(window, { key: 'Enter' })).toBe(true)
     expect(fireEvent.keyDown(window, { key: 'ArrowDown' })).toBe(true)
     expect(request).not.toHaveBeenCalled()
+  })
+
+  it('redacts response failures according to the authoritative pending request profile', async () => {
+    $activeSessionId.set('session-1')
+    $gateway.set({ request: vi.fn().mockRejectedValue(new Error('/srv/private/clarify.db token=secret')) } as never)
+    setClarifyRequest({
+      choices: ['staging'],
+      profile: 'default',
+      question: 'Which deployment target?',
+      requestId: 'request-profiled',
+      sessionId: 'session-1'
+    })
+    renderClarify(<ClarifyTool {...liveClarifyProps(['staging'])} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /staging/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }))
+
+    await waitFor(() =>
+      expect(notifyPromptResponseError).toHaveBeenCalledWith(expect.any(Error), expect.any(String), 'default')
+    )
   })
 })
 

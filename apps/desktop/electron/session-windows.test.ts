@@ -88,6 +88,25 @@ test('buildSessionWindowUrl adds the watch flag for spectator windows, before th
   assert.equal(url, 'http://localhost:5173/?win=secondary&watch=1#/abc')
 })
 
+test('buildSessionWindowUrl carries the normalized owner profile before the hash', () => {
+  const url = buildSessionWindowUrl('same', {
+    devServer: 'http://localhost:5173',
+    profile: '  profile-b  '
+  })
+
+  assert.equal(url, 'http://localhost:5173/?win=secondary&profile=profile-b#/same')
+})
+
+test('buildSessionWindowUrl encodes the owner profile without changing the session route', () => {
+  const url = buildSessionWindowUrl('same', {
+    devServer: 'http://localhost:5173',
+    profile: 'team / b',
+    watch: true
+  })
+
+  assert.equal(url, 'http://localhost:5173/?win=secondary&watch=1&profile=team%20%2F%20b#/same')
+})
+
 test('instanceWindowBounds cascades a new window off its source bounds', () => {
   const bounds = instanceWindowBounds({ x: 100, y: 120, width: 1400, height: 900 }, { width: 1, height: 1 })
 
@@ -118,6 +137,52 @@ test('registry opens one window per session and focuses on re-open', () => {
   assert.equal(first, second)
   assert.equal(registry.size, 1)
   assert.equal(win.calls.focus, 1, 'second open focuses the existing window')
+})
+
+test('registry treats the same stored session in two explicit profiles as distinct windows', () => {
+  const registry = createSessionWindowRegistry()
+  const a = makeFakeWindow()
+  const b = makeFakeWindow()
+
+  assert.equal(registry.openOrFocus('same', 'profile-a', () => a), a)
+  assert.equal(registry.openOrFocus('same', 'profile-b', () => b), b)
+  assert.equal(registry.size, 2)
+  assert.equal(registry.get('same', 'profile-a'), a)
+  assert.equal(registry.get('same', 'profile-b'), b)
+})
+
+test('registry normalizes profile and stored id then focuses only the matching owner', () => {
+  const registry = createSessionWindowRegistry()
+  const a = makeFakeWindow()
+  const b = makeFakeWindow()
+  let builtB = 0
+
+  registry.openOrFocus('same', 'profile-a', () => a)
+  registry.openOrFocus(' same ', ' profile-b ', () => b)
+
+  const reopened = registry.openOrFocus('same', 'profile-b', () => {
+    builtB += 1
+
+    return makeFakeWindow()
+  })
+
+  assert.equal(reopened, b)
+  assert.equal(builtB, 0)
+  assert.equal(a.calls.focus, 0)
+  assert.equal(b.calls.focus, 1)
+})
+
+test('registry preserves the legacy unprofiled call shape independently of explicit default', () => {
+  const registry = createSessionWindowRegistry()
+  const legacy = makeFakeWindow()
+  const explicitDefault = makeFakeWindow()
+
+  registry.openOrFocus('same', () => legacy)
+  registry.openOrFocus('same', '  ', () => explicitDefault)
+
+  assert.equal(registry.size, 2)
+  assert.equal(registry.get('same'), legacy)
+  assert.equal(registry.get('same', 'default'), explicitDefault)
 })
 
 test('registry restores + shows a minimized/hidden window on re-open', () => {

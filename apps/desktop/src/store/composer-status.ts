@@ -4,12 +4,12 @@ import { translateNow } from '@/i18n'
 import { stableArray } from '@/lib/stable-array'
 import type { TodoItem, TodoStatus } from '@/lib/todos'
 
-import { $gateway } from './gateway'
+import { $gateway, requestGatewayForProfile } from './gateway'
 import { $goalsBySession, type GoalStatus } from './goals'
 import { dispatchNativeNotification } from './native-notifications'
-import { notifyError } from './notifications'
-import { $sessions, lineageAliases } from './session'
-import { $sessionStates } from './session-states'
+import { notifyError, profiledPresentationError } from './notifications'
+import { $sessions, lineageAliases, sessionDurableStateKey } from './session'
+import { $sessionStates, sessionRuntimeStateIdentity, sessionRuntimeStateKey } from './session-states'
 import { $subagentsBySession, type SubagentProgress } from './subagents'
 import { $todosBySession } from './todos'
 
@@ -59,15 +59,17 @@ export const $backgroundRunningSessionIds = computed(
   (bg, states, sessions) => {
     const ids = new Set<string>()
 
-    for (const [runtimeId, items] of Object.entries(bg)) {
+    for (const [runtimeKey, items] of Object.entries(bg)) {
       if (!items.some(i => i.state === 'running')) {
         continue
       }
 
       // Same fresh-chat fallback as the working/attention projections: before a
       // conversation is persisted its runtime id is the id surfaces key on.
-      for (const alias of lineageAliases(states[runtimeId]?.storedSessionId ?? runtimeId, sessions)) {
-        ids.add(alias)
+      const { profile, runtimeSessionId } = sessionRuntimeStateIdentity(runtimeKey)
+
+      for (const alias of lineageAliases(states[runtimeKey]?.storedSessionId ?? runtimeSessionId, sessions, profile)) {
+        ids.add(sessionDurableStateKey(profile, alias))
       }
     }
 
@@ -120,20 +122,6 @@ function cancelAutoDismiss(sid: string, id: string) {
     clearTimeout(timer)
     timers.delete(id)
   }
-}
-
-function cancelAllAutoDismiss(sid: string) {
-  const timers = autoClearTimers.get(sid)
-
-  if (!timers) {
-    return
-  }
-
-  for (const timer of timers.values()) {
-    clearTimeout(timer)
-  }
-
-  autoClearTimers.delete(sid)
 }
 
 const subToItem = (s: SubagentProgress): ComposerStatusItem => ({
@@ -303,7 +291,9 @@ const sameItem = (a: ComposerStatusItem, b: ComposerStatusItem) =>
  * processes append, dismissed ids stay gone, and unchanged rows keep their
  * object identity so memoised rows skip re-rendering.
  */
-export function reconcileBackgroundProcesses(sid: string, procs: GatewayProcessEntry[]) {
+export function reconcileBackgroundProcesses(sid: string, procs: GatewayProcessEntry[], profile?: null | string) {
+  const runtimeSid = sid
+  sid = sessionRuntimeStateKey(profile, sid)
   const dismissed = dismissedBySession.get(sid)
 
   const fresh = new Map(
@@ -322,7 +312,8 @@ export function reconcileBackgroundProcesses(sid: string, procs: GatewayProcessE
       dispatchNativeNotification({
         body: item.title,
         kind: 'backgroundDone',
-        sessionId: sid,
+        profile,
+        sessionId: runtimeSid,
         title: translateNow(
           item.state === 'failed'
             ? 'notifications.native.backgroundFailedTitle'
@@ -378,24 +369,33 @@ export function reconcileBackgroundProcesses(sid: string, procs: GatewayProcessE
 }
 
 /** Pull the session's live process snapshot from the gateway. */
-export async function refreshBackgroundProcesses(sid: string): Promise<void> {
-  const gateway = $gateway.get()
-
-  if (!sid || !gateway) {
+export async function refreshBackgroundProcesses(sid: string, profile?: null | string): Promise<void> {
+  if (!sid) {
     return
   }
 
   try {
-    const result = await gateway.request<{ processes?: GatewayProcessEntry[] }>('process.list', { session_id: sid })
+    const result =
+      profile == null
+        ? await $gateway.get()?.request<{ processes?: GatewayProcessEntry[] }>('process.list', { session_id: sid })
+        : await requestGatewayForProfile<{ processes?: GatewayProcessEntry[] }>(profile, 'process.list', {
+            session_id: sid
+          })
 
-    reconcileBackgroundProcesses(sid, result?.processes ?? [])
-  } catch {
+    if (!result) {
+      return
+    }
+
+    reconcileBackgroundProcesses(sid, result?.processes ?? [], profile)
+  } catch (error) {
     // Transient socket loss — the next trigger (event or poll) retries.
+    console.error('Failed to refresh background processes', { error, profile, sessionId: sid })
   }
 }
 
 /** X on a finished row: drop it now and keep it dropped across refreshes. */
-export function dismissBackgroundProcess(sid: string, id: string) {
+export function dismissBackgroundProcess(sid: string, id: string, profile?: null | string) {
+  sid = sessionRuntimeStateKey(profile, sid)
   cancelAutoDismiss(sid, id)
 
   const dismissed = dismissedBySession.get(sid) ?? new Set<string>()
@@ -410,45 +410,74 @@ export function dismissBackgroundProcess(sid: string, id: string) {
   )
 }
 
+/** Renderer-only terminal cleanup after the backend has archived/deleted the
+ * owning session. No process RPC is issued: the successful destructive session
+ * mutation is already authoritative, and cleanup must not be retargeted. */
+export function discardSessionBackground(sid: string, profile: string): void {
+  const key = sessionRuntimeStateKey(profile, sid)
+  const timers = autoClearTimers.get(key)
+
+  for (const timer of timers?.values() ?? []) {
+    clearTimeout(timer)
+  }
+
+  autoClearTimers.delete(key)
+  dismissedBySession.delete(key)
+  writeBackground(key, [])
+}
+
 /** X on a running row: kill the process for real, THEN drop the row. Only drop
  *  on a confirmed kill — dismissing unconditionally (the old behavior) hid the
  *  row while the process lived on, stranding rogue tasks. On failure the row
  *  stays so the user can retry / see it didn't die. */
-export async function stopBackgroundProcess(sid: string, id: string): Promise<void> {
+export async function stopBackgroundProcess(sid: string, id: string, profile?: null | string): Promise<void> {
   try {
-    await $gateway.get()?.request('process.kill', { process_id: id, session_id: sid })
-    dismissBackgroundProcess(sid, id)
+    const params = { process_id: id, session_id: sid }
+
+    if (profile == null) {
+      const gateway = $gateway.get()
+
+      if (!gateway) {
+        throw new Error('Hermes gateway unavailable')
+      }
+
+      await gateway.request('process.kill', params)
+    } else {
+      await requestGatewayForProfile(profile, 'process.kill', params)
+    }
+
+    dismissBackgroundProcess(sid, id, profile)
   } catch (err) {
-    notifyError(err, 'Could not stop the process')
+    console.error('Failed to stop background process', { error: err, processId: id, profile, sessionId: sid })
+    const fallback = 'Could not stop the process'
+    notifyError(profiledPresentationError(err, fallback, profile), fallback)
   }
 }
 
 /**
  * Rewind cleanup: a restore/edit discards the turns that spawned these
- * processes, so they belong to an abandoned timeline. Kill the live ones and
- * drop every row. Ids are marked dismissed so an in-flight `process.list` poll
- * (kill is async) can't resurrect them; reconcile garbage-collects those once
- * the registry stops reporting them.
+ * processes, so they belong to an abandoned timeline. Finished rows disappear
+ * immediately; running rows disappear only after their owner confirms the kill.
+ * A failed kill remains visible and retryable instead of hiding live work.
  */
-export function resetSessionBackground(sid: string) {
+export async function resetSessionBackground(sid: string, profile?: null | string): Promise<void> {
   if (!sid) {
     return
   }
 
-  cancelAllAutoDismiss(sid)
+  const runtimeSid = sid
+  const stateKey = sessionRuntimeStateKey(profile, sid)
+  const list = $backgroundStatusBySession.get()[stateKey] ?? []
 
-  const gateway = $gateway.get()
-  const list = $backgroundStatusBySession.get()[sid] ?? []
-  const dismissed = dismissedBySession.get(sid) ?? new Set<string>()
+  await Promise.all(
+    list.map(async item => {
+      if (item.state !== 'running') {
+        dismissBackgroundProcess(runtimeSid, item.id, profile)
 
-  for (const item of list) {
-    dismissed.add(item.id)
+        return
+      }
 
-    if (item.state === 'running') {
-      void gateway?.request('process.kill', { process_id: item.id, session_id: sid }).catch(() => undefined)
-    }
-  }
-
-  dismissedBySession.set(sid, dismissed)
-  writeBackground(sid, [])
+      await stopBackgroundProcess(runtimeSid, item.id, profile)
+    })
+  )
 }

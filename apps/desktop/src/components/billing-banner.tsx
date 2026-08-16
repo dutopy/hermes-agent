@@ -1,11 +1,12 @@
 import { useStore } from '@nanostores/react'
+import { useMemo } from 'react'
 
 import { StatusRow } from '@/components/chat/status-row'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
-import { $billingBlock, billingCtaLabel, clearBillingBlock, runBillingRecovery } from '@/store/billing-block'
+import { billingBlockForSession, billingCtaLabel, clearBillingBlock, runBillingRecovery } from '@/store/billing-block'
 
 function firstLine(text: string): string {
   return (text || '').split('\n')[0]?.trim() ?? ''
@@ -20,8 +21,8 @@ function firstLine(text: string): string {
  * providers deep-link out. The sticky toast is the loud surface; this is the calm
  * reminder that outlives it.
  */
-export function BillingBanner({ sessionId }: { sessionId: null | string }) {
-  const active = useStore($billingBlock)
+export function BillingBanner({ profile, sessionId }: { profile?: string; sessionId: null | string }) {
+  const active = useStore(useMemo(() => billingBlockForSession(sessionId, profile), [profile, sessionId]))
   const { t } = useI18n()
 
   if (!active || !sessionId || active.sessionId !== sessionId) {
@@ -51,7 +52,7 @@ export function BillingBanner({ sessionId }: { sessionId: null | string }) {
             <Button
               aria-label={copy.dismiss}
               className="size-4 rounded-md text-muted-foreground/60 hover:text-foreground/90"
-              onClick={() => clearBillingBlock(sessionId)}
+              onClick={() => clearBillingBlock(sessionId, profile)}
               size="icon-xs"
               type="button"
               variant="ghost"

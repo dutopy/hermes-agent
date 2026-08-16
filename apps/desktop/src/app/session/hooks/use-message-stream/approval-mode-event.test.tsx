@@ -20,6 +20,7 @@ function Harness() {
   const queryClientRef = useRef(new QueryClient())
 
   const stream = useMessageStream({
+    activeGatewayProfile: 'work',
     activeSessionIdRef,
     hydrateFromStoredSession: vi.fn(async () => undefined),
     queryClient: queryClientRef.current,

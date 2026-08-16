@@ -42,6 +42,27 @@ describe('resolveStoredSession profile ownership', () => {
     expect(mockGetSession).not.toHaveBeenCalled()
   })
 
+  it('requires the explicit owner when homonymous cached rows exist', async () => {
+    const profileA = session({ id: 'same', profile: 'default', title: 'A private' })
+    const profileB = session({ id: 'same', profile: 'meta', title: 'B private' })
+    $sessions.set([profileA, profileB])
+
+    const resolved = await resolveStoredSession('same', 'meta')
+
+    expect(resolved).toBe(profileB)
+    expect(mockGetSession).not.toHaveBeenCalled()
+  })
+
+  it('probes only the explicit owner and stamps that owner on legacy responses', async () => {
+    mockGetSession.mockResolvedValueOnce(session({ id: 'same', title: 'B private' }))
+
+    const resolved = await resolveStoredSession('same', 'meta')
+
+    expect(mockGetSession).toHaveBeenCalledTimes(1)
+    expect(mockGetSession).toHaveBeenCalledWith('same', 'meta')
+    expect(resolved?.profile).toBe('meta')
+  })
+
   it('treats a profile-less cache hit as unresolved when multiple profiles exist', async () => {
     $sessions.set([session({ id: 's1' })])
     mockGetSession.mockRejectedValueOnce(new Error('404: Session not found'))

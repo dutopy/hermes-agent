@@ -811,6 +811,28 @@ describe('overlayLiveLanes', () => {
     expect(overlaid.sessionCount).toBe(1)
   })
 
+  it('evicts only the profile-qualified homonym from lanes', () => {
+    const a = makeSession('/www/app', { id: 'same', profile: 'profile-a', title: 'A' })
+    const b = makeSession('/www/app', { id: 'same', profile: 'profile-b', title: 'B' })
+
+    const project = projectNode({
+      id: '/www/app',
+      repos: [
+        {
+          id: '/www/app',
+          label: 'app',
+          path: '/www/app',
+          sessionCount: 2,
+          groups: [lane({ id: 'main', label: 'main', isMain: true, path: '/www/app', sessions: [a, b] })]
+        }
+      ]
+    })
+
+    const overlaid = overlayLiveLanes(project, [], new Set(['profile-b\u0000same']))
+
+    expect(overlaid.repos[0].groups[0].sessions.map(session => session.title)).toEqual(['A'])
+  })
+
   it('adds a brand-new detached chat to Home, and evicts a deleted one', () => {
     const existing = makeSession(null, { id: 'old', started_at: 1 })
     const doomed = makeSession(null, { id: 'gone', started_at: 2 })
@@ -858,6 +880,22 @@ describe('overlayLivePreviews', () => {
     const previews = overlayLivePreviews([project], [], [], 3, { removed: new Set(['gone']) })
 
     expect(previews['/www/app'].map(s => s.id)).toEqual(['old'])
+  })
+
+  it('evicts only the profile-qualified homonym from project previews', () => {
+    const project = projectNode({
+      id: '/www/app',
+      previewSessions: [
+        makeSession('/www/app', { id: 'same', profile: 'profile-b', title: 'B' }),
+        makeSession('/www/app', { id: 'same', profile: 'profile-a', title: 'A' })
+      ]
+    })
+
+    const previews = overlayLivePreviews([project], [], [], 3, {
+      removed: new Set(['profile-b\u0000same'])
+    })
+
+    expect(previews['/www/app'].map(session => session.title)).toEqual(['A'])
   })
 
   it('ranks by the active sort key before trimming, so the preview is its top rows', () => {

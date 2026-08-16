@@ -3,6 +3,20 @@ import { describe, expect, it } from 'vitest'
 import { $toolInlineDiff, getToolDiff, recordToolDiff } from './tool-diffs'
 
 describe('tool-diffs per-tool subscriptions', () => {
+  it('isolates identical tool ids by profile and runtime without profiled legacy fallback', () => {
+    const runtimeId = 'shared-runtime'
+    const toolCallId = 'shared-tool'
+
+    recordToolDiff(toolCallId, 'legacy', undefined)
+    recordToolDiff(toolCallId, 'profile A', { profile: 'profile-a', runtimeId })
+    recordToolDiff(toolCallId, 'profile B', { profile: 'profile-b', runtimeId })
+
+    expect(getToolDiff(toolCallId, { profile: 'profile-a', runtimeId })).toBe('profile A')
+    expect(getToolDiff(toolCallId, { profile: 'profile-b', runtimeId })).toBe('profile B')
+    expect(getToolDiff(toolCallId, { profile: 'profile-c', runtimeId })).toBe('')
+    expect(getToolDiff(toolCallId)).toBe('legacy')
+  })
+
   it('returns a stable cached atom per toolCallId', () => {
     expect($toolInlineDiff('a')).toBe($toolInlineDiff('a'))
     expect($toolInlineDiff('a')).not.toBe($toolInlineDiff('b'))

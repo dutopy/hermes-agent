@@ -2,6 +2,8 @@ import { atom } from 'nanostores'
 
 import { capitalize } from '@/lib/text'
 
+import { sessionRuntimeStateKey } from './session-states'
+
 export type SubagentStatus = 'completed' | 'failed' | 'interrupted' | 'queued' | 'running'
 export type SubagentStreamKind = 'progress' | 'summary' | 'thinking' | 'tool'
 
@@ -178,14 +180,15 @@ function toProgress(payload: SubagentPayload, prev: SubagentProgress | undefined
   }
 }
 
-export function clearSessionSubagents(sid: string) {
+export function clearSessionSubagents(sid: string, profile?: null | string) {
+  const key = sessionRuntimeStateKey(profile, sid)
   const map = $subagentsBySession.get()
 
-  if (!(sid in map)) {
+  if (!(key in map)) {
     return
   }
 
-  const { [sid]: _drop, ...rest } = map
+  const { [key]: _drop, ...rest } = map
   $subagentsBySession.set(rest)
 }
 
@@ -201,9 +204,10 @@ export function clearSessionSubagents(sid: string) {
  * `pruneDelegateFallbackSubagents` (which filters by id prefix to remove
  * placeholder rows once the real native event arrives).
  */
-export function pruneFinishedSessionSubagents(sid: string) {
+export function pruneFinishedSessionSubagents(sid: string, profile?: null | string) {
+  const key = sessionRuntimeStateKey(profile, sid)
   const map = $subagentsBySession.get()
-  const list = map[sid]
+  const list = map[key]
 
   if (!list?.length) {
     return
@@ -215,12 +219,13 @@ export function pruneFinishedSessionSubagents(sid: string) {
     return
   }
 
-  $subagentsBySession.set({ ...map, [sid]: next })
+  $subagentsBySession.set({ ...map, [key]: next })
 }
 
-export function pruneDelegateFallbackSubagents(sid: string) {
+export function pruneDelegateFallbackSubagents(sid: string, profile?: null | string) {
+  const key = sessionRuntimeStateKey(profile, sid)
   const map = $subagentsBySession.get()
-  const list = map[sid]
+  const list = map[key]
 
   if (!list?.length) {
     return
@@ -232,12 +237,19 @@ export function pruneDelegateFallbackSubagents(sid: string) {
     return
   }
 
-  $subagentsBySession.set({ ...map, [sid]: next })
+  $subagentsBySession.set({ ...map, [key]: next })
 }
 
-export function upsertSubagent(sid: string, payload: SubagentPayload, createIfMissing = true, eventType?: string) {
+export function upsertSubagent(
+  sid: string,
+  payload: SubagentPayload,
+  createIfMissing = true,
+  eventType?: string,
+  profile?: null | string
+) {
+  const key = sessionRuntimeStateKey(profile, sid)
   const map = $subagentsBySession.get()
-  const list = map[sid] ?? []
+  const list = map[key] ?? []
   const id = idOf(payload)
   const idx = list.findIndex(item => item.id === id)
 
@@ -254,7 +266,7 @@ export function upsertSubagent(sid: string, payload: SubagentPayload, createIfMi
   const next = toProgress(payload, prev, eventType)
   const nextList = idx >= 0 ? list.map(item => (item.id === id ? next : item)) : [...list, next]
 
-  $subagentsBySession.set({ ...map, [sid]: nextList })
+  $subagentsBySession.set({ ...map, [key]: nextList })
 }
 
 export function buildSubagentTree(items: readonly SubagentProgress[]): SubagentNode[] {

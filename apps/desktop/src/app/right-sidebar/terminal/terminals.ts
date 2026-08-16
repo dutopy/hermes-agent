@@ -1,6 +1,7 @@
 import { atom, computed } from 'nanostores'
 
 import { readKey, writeKey } from '@/lib/storage'
+import { normalizeProfileKey } from '@/store/profile'
 import { $currentCwd } from '@/store/session'
 
 import { setTerminalTakeover } from '../store'
@@ -33,6 +34,8 @@ export interface TerminalEntry {
    *  background process (`terminal(background=true)`), keyed by `procId`. */
   kind: 'user' | 'agent'
   procId?: string
+  /** Owning gateway profile. Undefined is the controlled legacy namespace. */
+  profile?: string
 }
 
 interface PersistedTerminalEntry {
@@ -171,38 +174,97 @@ export function createTerminal(cwd: string = $currentCwd.get()): string {
 // resurrect it on the next poll while the process is still running.
 const surfacedProcs = new Set<string>()
 
-const findByProc = (procId: string) => $terminals.get().find(term => term.procId === procId)
+interface AgentProcessIdentity {
+  procId: string
+  profile?: string
+}
+
+const processKey = ({ procId, profile }: AgentProcessIdentity) =>
+  JSON.stringify(profile === undefined ? ['legacy', procId] : ['profile', normalizeProfileKey(profile), procId])
+
+const findByProc = ({ procId, profile }: AgentProcessIdentity) =>
+  $terminals
+    .get()
+    .find(
+      term =>
+        term.kind === 'agent' &&
+        term.procId === procId &&
+        (profile === undefined
+          ? term.profile === undefined
+          : term.profile !== undefined && normalizeProfileKey(term.profile) === normalizeProfileKey(profile))
+    )
+
+function processIdentity(first: string, second?: string): AgentProcessIdentity {
+  return second === undefined ? { procId: first } : { procId: second, profile: first }
+}
 
 /** Auto-surface an agent background process as a read-only tab — once. Returns
  *  the tab id, or null if it was already surfaced and the user has since closed it. */
-export function ensureAgentTerminal(procId: string, title: string): string | null {
-  const existing = findByProc(procId)
+export function ensureAgentTerminal(
+  ...args: [procId: string, title: string] | [profile: string, procId: string, title: string]
+): string | null {
+  const identity = processIdentity(args[0], args.length === 3 ? args[1] : undefined)
+  const title = args.length === 3 ? args[2] : args[1]
+  const key = processKey(identity)
+  const existing = findByProc(identity)
 
   if (existing) {
     return existing.id
   }
 
-  if (surfacedProcs.has(procId)) {
+  if (surfacedProcs.has(key)) {
     return null
   }
 
-  surfacedProcs.add(procId)
+  surfacedProcs.add(key)
   const id = newId()
-  $terminals.set([...$terminals.get(), { id, title: title || 'agent', auto: false, cwd: '', kind: 'agent', procId }])
+  $terminals.set([
+    ...$terminals.get(),
+    {
+      id,
+      title: title || 'agent',
+      auto: false,
+      cwd: '',
+      kind: 'agent',
+      procId: identity.procId,
+      ...(identity.profile !== undefined ? { profile: normalizeProfileKey(identity.profile) } : {})
+    }
+  ])
 
   return id
 }
 
 /** Open + focus an agent process's tab (the status-stack link), recreating it if
  *  the user had closed it. Opens the pane. */
-export function openAgentTerminal(procId: string, title: string): void {
-  surfacedProcs.add(procId)
-  seedAgentTerminalCommand(procId, title)
-  let id = findByProc(procId)?.id
+export function openAgentTerminal(
+  ...args: [procId: string, title: string] | [profile: string, procId: string, title: string]
+): void {
+  const identity = processIdentity(args[0], args.length === 3 ? args[1] : undefined)
+  const title = args.length === 3 ? args[2] : args[1]
+  surfacedProcs.add(processKey(identity))
+
+  if (identity.profile === undefined) {
+    seedAgentTerminalCommand(identity.procId, title)
+  } else {
+    seedAgentTerminalCommand(identity.profile, identity.procId, title)
+  }
+
+  let id = findByProc(identity)?.id
 
   if (!id) {
     id = newId()
-    $terminals.set([...$terminals.get(), { id, title: title || 'agent', auto: false, cwd: '', kind: 'agent', procId }])
+    $terminals.set([
+      ...$terminals.get(),
+      {
+        id,
+        title: title || 'agent',
+        auto: false,
+        cwd: '',
+        kind: 'agent',
+        procId: identity.procId,
+        ...(identity.profile !== undefined ? { profile: normalizeProfileKey(identity.profile) } : {})
+      }
+    ])
   }
 
   $activeTerminalId.set(id)
@@ -306,8 +368,8 @@ export function closeTerminal(id: string): void {
  *  The process is NOT killed — only the view is dropped; `surfacedProcs` keeps
  *  it from auto-resurfacing, and the status-stack row can reopen it on demand.
  *  No-op when no such tab exists. */
-export function closeAgentTerminalByProc(procId: string): boolean {
-  const term = $terminals.get().find(t => t.kind === 'agent' && t.procId === procId)
+export function closeAgentTerminalByProc(...args: [procId: string] | [profile: string, procId: string]): boolean {
+  const term = findByProc(processIdentity(args[0], args[1]))
 
   if (!term) {
     return false

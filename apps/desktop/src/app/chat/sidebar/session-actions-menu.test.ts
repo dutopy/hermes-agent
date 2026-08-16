@@ -1,9 +1,10 @@
 import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { $activeSessionId, $selectedStoredSessionId } from '@/store/session'
+import { $activeGatewayProfile } from '@/store/profile'
+import { $activeSessionId, $selectedStoredSessionId, $sessions, setSessions } from '@/store/session'
 
-import { renameSessionPreferringRpc } from './session-actions-menu'
+import { renameSessionOptimistically, renameSessionPreferringRpc } from './session-actions-menu'
 
 // The branched-session rename bug: a freshly branched session lives only in the
 // gateway's runtime _sessions map (no state.db row yet), so REST PATCH
@@ -53,6 +54,8 @@ afterEach(() => {
   activeGateway.mockReturnValue({ request })
   $activeSessionId.set(null)
   $selectedStoredSessionId.set(null)
+  $activeGatewayProfile.set('default')
+  setSessions([])
 })
 
 describe('renameSessionPreferringRpc', () => {
@@ -67,15 +70,15 @@ describe('renameSessionPreferringRpc', () => {
     expect(result.title).toBe('rpc-title')
   })
 
-  it('falls back to REST when the RPC fails (e.g. socket mid-reconnect)', async () => {
+  it('falls back to unprofiled REST when the legacy primary RPC fails (e.g. socket mid-reconnect)', async () => {
     $selectedStoredSessionId.set(STORED_ID)
     $activeSessionId.set(RUNTIME_ID)
     request.mockRejectedValueOnce(new Error('not connected'))
 
-    const result = await renameSessionPreferringRpc(STORED_ID, 'My branch', 'work')
+    const result = await renameSessionPreferringRpc(STORED_ID, 'My branch')
 
     expect(request).toHaveBeenCalledOnce()
-    expect(renameSession).toHaveBeenCalledWith(STORED_ID, 'My branch', 'work')
+    expect(renameSession).toHaveBeenCalledWith(STORED_ID, 'My branch', undefined)
     expect(result.title).toBe('rest-title')
   })
 
@@ -87,6 +90,29 @@ describe('renameSessionPreferringRpc', () => {
 
     expect(request).not.toHaveBeenCalled()
     expect(renameSession).toHaveBeenCalledWith(STORED_ID, 'My branch', 'work')
+  })
+
+  it('does not send an explicit profile rename to the colliding foreground runtime even when that RPC would succeed', async () => {
+    $activeGatewayProfile.set('profile-a')
+    $selectedStoredSessionId.set('same')
+    $activeSessionId.set('runtime-a')
+
+    const result = await renameSessionPreferringRpc('same', 'Profile B renamed', 'profile-b')
+
+    expect(request).not.toHaveBeenCalled()
+    expect(renameSession).toHaveBeenCalledWith('same', 'Profile B renamed', 'profile-b')
+    expect(result.title).toBe('rest-title')
+  })
+
+  it('keeps explicit default isolated from the unprofiled legacy RPC path', async () => {
+    $activeGatewayProfile.set('default')
+    $selectedStoredSessionId.set(STORED_ID)
+    $activeSessionId.set(RUNTIME_ID)
+
+    await renameSessionPreferringRpc(STORED_ID, 'Explicit default', 'default')
+
+    expect(request).not.toHaveBeenCalled()
+    expect(renameSession).toHaveBeenCalledWith(STORED_ID, 'Explicit default', 'default')
   })
 
   it('uses REST when clearing the title (RPC rejects empty titles)', async () => {
@@ -108,5 +134,57 @@ describe('renameSessionPreferringRpc', () => {
 
     expect(request).not.toHaveBeenCalled()
     expect(renameSession).toHaveBeenCalledWith(STORED_ID, 'My branch', undefined)
+  })
+})
+
+describe('renameSessionOptimistically', () => {
+  const collidingRows = () =>
+    [
+      { id: 'same', profile: 'profile-a', title: 'Profile A' },
+      { id: 'same', profile: 'profile-b', title: 'Profile B' }
+    ] as never
+
+  it('optimistically updates only the explicitly owned row while the durable rename is pending', async () => {
+    let resolveRename!: (value: { ok: boolean; title: string }) => void
+    renameSession.mockImplementationOnce(
+      () => new Promise(resolve => (resolveRename = resolve)) as ReturnType<typeof renameSession>
+    )
+    $activeGatewayProfile.set('profile-a')
+    $selectedStoredSessionId.set('same')
+    $activeSessionId.set('runtime-a')
+    setSessions(collidingRows())
+
+    const pending = renameSessionOptimistically('same', 'Profile B pending', 'profile-b')
+
+    expect($sessions.get().map(row => [row.profile, row.title])).toEqual([
+      ['profile-a', 'Profile A'],
+      ['profile-b', 'Profile B pending']
+    ])
+    expect(request).not.toHaveBeenCalled()
+    resolveRename({ ok: true, title: 'Profile B durable' })
+    await pending
+
+    expect($sessions.get().map(row => [row.profile, row.title])).toEqual([
+      ['profile-a', 'Profile A'],
+      ['profile-b', 'Profile B durable']
+    ])
+  })
+
+  it('rolls back only the explicitly owned row when the durable rename fails', async () => {
+    renameSession.mockRejectedValueOnce(new Error('profile-b backend unavailable'))
+    $activeGatewayProfile.set('profile-a')
+    $selectedStoredSessionId.set('same')
+    $activeSessionId.set('runtime-a')
+    setSessions(collidingRows())
+
+    await expect(renameSessionOptimistically('same', 'Profile B pending', 'profile-b')).rejects.toThrow(
+      'profile-b backend unavailable'
+    )
+
+    expect(request).not.toHaveBeenCalled()
+    expect($sessions.get().map(row => [row.profile, row.title])).toEqual([
+      ['profile-a', 'Profile A'],
+      ['profile-b', 'Profile B']
+    ])
   })
 })

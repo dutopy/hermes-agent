@@ -307,6 +307,32 @@ describe('touchSessionActivity', () => {
 
     expect($sessions.get()).toBe(prev)
   })
+
+  it('updates only the explicitly owned profile when stored ids collide', () => {
+    const profileA = session({ id: 'same', last_active: 10, preview: 'A secret', profile: 'profile-a' })
+    const profileB = session({ id: 'same', last_active: 20, preview: 'B old', profile: 'profile-b' })
+    setSessions([profileA, profileB])
+
+    touchSessionActivity('same', { at: 99, preview: 'B secret' }, 'profile-b')
+
+    expect($sessions.get()).toEqual([
+      profileA,
+      expect.objectContaining({ last_active: 99, preview: 'B secret', profile: 'profile-b' })
+    ])
+    expect($sessions.get()[0]).toBe(profileA)
+  })
+
+  it('keeps explicit default distinct from the omitted-profile legacy path', () => {
+    const explicitDefault = session({ id: 'same', last_active: 1, profile: 'default' })
+    const other = session({ id: 'same', last_active: 2, profile: 'other' })
+    setSessions([explicitDefault, other])
+
+    touchSessionActivity('same', { at: 10 }, 'default')
+    expect($sessions.get().map(row => row.last_active)).toEqual([10, 2])
+
+    touchSessionActivity('same', { at: 20 })
+    expect($sessions.get().map(row => row.last_active)).toEqual([20, 20])
+  })
 })
 
 describe('workspaceCwdForNewSession', () => {

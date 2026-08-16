@@ -348,6 +348,13 @@ function ToolEntry({ part }: ToolEntryProps) {
   const messageRunning = useAuiState(selectMessageRunning)
   const embedded = useContext(ToolEmbedContext)
   const toolViewMode = useStore($toolViewMode)
+  const {
+    $cwd: $sessionCwd,
+    $runtimeId: $sessionRuntimeId,
+    kind: sessionViewKind,
+    profile: sessionProfile
+  } = useSessionView()
+  const sessionRuntimeId = useStore($sessionRuntimeId)
 
   // `ToolFallback` rebuilds the `part` wrapper each render, defeating the memos
   // below and re-running buildToolView (full JSON.stringify of result) on every
@@ -363,9 +370,21 @@ function ToolEntry({ part }: ToolEntryProps) {
   const disclosureId = toolEntryDisclosureId(messageId, stablePart)
   const dismissed = useStore($toolRowDismissed(disclosureId))
   const isPending = messageRunning && result === undefined
-  // Subscribe to this tool's diff only, so a live patch for one tool doesn't
-  // re-render every mounted tool row (the factory caches a per-id atom).
-  const sideDiff = useStore($toolInlineDiff(toolCallId ?? ''))
+  // Subscribe to this tool's complete owner key. A profiled tile never falls
+  // back to the naked legacy id; only the primary view opts into compatibility
+  // for old unprofiled gateway events.
+  const sideDiff = useStore(
+    $toolInlineDiff(
+      toolCallId ?? '',
+      sessionProfile
+        ? {
+            legacyFallback: sessionViewKind === 'primary',
+            profile: sessionProfile,
+            runtimeId: sessionRuntimeId ?? ''
+          }
+        : undefined
+    )
+  )
   const inlineDiff = stripInlineDiffChrome(sideDiff) || inlineDiffFromResult(result)
   const isFileEdit = isFileEditTool(toolName)
   const defaultOpen = Boolean(inlineDiff)
@@ -394,7 +413,6 @@ function ToolEntry({ part }: ToolEntryProps) {
   const previewTarget = view.previewTarget
   // The session whose transcript this row is IN, which is not necessarily the
   // primary one: a tool row inside a session tile must feed that tile's composer.
-  const { $cwd: $sessionCwd, $runtimeId: $sessionRuntimeId } = useSessionView()
 
   useEffect(() => {
     if (isPending || !previewTarget || !isPreviewableTarget(previewTarget)) {
@@ -407,9 +425,9 @@ function ToolEntry({ part }: ToolEntryProps) {
     const sessionId = $sessionRuntimeId.get()
 
     if (sessionId) {
-      recordPreviewArtifact(sessionId, previewTarget, $sessionCwd.get() || '')
+      recordPreviewArtifact(sessionId, previewTarget, $sessionCwd.get() || '', sessionProfile)
     }
-  }, [$sessionCwd, $sessionRuntimeId, isPending, previewTarget])
+  }, [$sessionCwd, $sessionRuntimeId, isPending, previewTarget, sessionProfile])
 
   const detailSections = useMemo(() => {
     if (!view.detail) {
@@ -887,8 +905,17 @@ const ToolRun: FC<PropsWithChildren<{ endIndex: number; startIndex: number }>> =
 }) => {
   const messageRunning = useAuiState(selectMessageRunning)
   const { count, entryIds, key, live, pendingApprovalTool, summary } = useToolRun(startIndex, endIndex)
-  const sessionId = useStore(useSessionView().$runtimeId)
-  const approval = useStore(useMemo(() => sessionApprovalRequest(sessionId), [sessionId]))
+  const view = useSessionView()
+  const sessionId = useStore(view.$runtimeId)
+  const allowLegacyFallback = view.kind === 'primary'
+
+  const approval = useStore(
+    useMemo(
+      () => sessionApprovalRequest(sessionId, view.profile, allowLegacyFallback),
+      [allowLegacyFallback, sessionId, view.profile]
+    )
+  )
+
   const disclosureId = `tool-run:${key}`
   const persistedOpen = useStore($toolDisclosureOpen(disclosureId))
   const rowOpen = useStore(useMemo(() => $anyToolDisclosureOpen(entryIds), [entryIds]))

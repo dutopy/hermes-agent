@@ -1,7 +1,9 @@
-import { renderHook } from '@testing-library/react'
+import { renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { _resetLegacyDiscardForTests } from '@/store/session'
+import { createClientSessionState } from '@/lib/chat-runtime'
+import { $activeSessionId, $selectedStoredSessionId, _resetLegacyDiscardForTests } from '@/store/session'
+import { $sessionTiles, clearAllSessionStates, publishSessionState } from '@/store/session-states'
 import type * as WindowsStore from '@/store/windows'
 import type { SessionInfo } from '@/types/hermes'
 
@@ -10,7 +12,17 @@ import { useDesktopIntegrations } from './use-desktop-integrations'
 // Mutable HUD-window flag so the restore tests can flip the window kind the
 // hook believes it runs in. Default false keeps the pre-existing restore
 // coverage exercising the real main-window path.
-const { hudWindowMock } = vi.hoisted(() => ({ hudWindowMock: vi.fn(() => false) }))
+const { hudWindowMock, requestGatewayForProfileMock, respondToApprovalActionMock } = vi.hoisted(() => ({
+  hudWindowMock: vi.fn(() => false),
+  requestGatewayForProfileMock: vi.fn(),
+  respondToApprovalActionMock: vi.fn()
+}))
+
+vi.mock('@/store/native-notifications', () => ({ respondToApprovalAction: respondToApprovalActionMock }))
+vi.mock('@/store/gateway', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  requestGatewayForProfile: requestGatewayForProfileMock
+}))
 
 vi.mock('@/store/windows', async importOriginal => {
   const actual = await importOriginal<typeof WindowsStore>()
@@ -52,11 +64,21 @@ const session = (over: Partial<SessionInfo> = {}): SessionInfo => ({
 
 describe('useDesktopIntegrations', () => {
   let navigate: ReturnType<typeof vi.fn<(...args: unknown[]) => void>>
+  let notificationAction: ((payload: { actionId: string; profile?: string; sessionId?: string }) => void) | undefined
+  let focusSession: ((payload: { profile?: string; sessionId: string }) => void) | undefined
 
   beforeEach(() => {
     window.localStorage.clear()
     _resetLegacyDiscardForTests()
+    clearAllSessionStates()
+    $sessionTiles.set([])
+    $activeSessionId.set(null)
+    $selectedStoredSessionId.set(null)
     navigate = vi.fn()
+    notificationAction = undefined
+    focusSession = undefined
+    requestGatewayForProfileMock.mockReset()
+    respondToApprovalActionMock.mockReset()
     // Every test starts as a main window; only the HUD describe flips this.
     hudWindowMock.mockReturnValue(false)
 
@@ -66,8 +88,16 @@ describe('useDesktopIntegrations', () => {
     desktopWindow.hermesDesktop = {
       setPreviewShortcutActive: vi.fn(),
       onOpenUpdatesRequested: vi.fn(),
-      onFocusSession: vi.fn(),
-      onNotificationAction: vi.fn(),
+      onFocusSession: vi.fn(callback => {
+        focusSession = callback
+
+        return vi.fn()
+      }),
+      onNotificationAction: vi.fn(callback => {
+        notificationAction = callback
+
+        return vi.fn()
+      }),
       onDeepLink: vi.fn(),
       signalDeepLinkReady: vi.fn(),
       onClosePreviewRequested: vi.fn(),
@@ -117,7 +147,6 @@ describe('useDesktopIntegrations', () => {
           refreshSessions: vi.fn(),
           resumeExhaustedSessionId,
           routedSessionId,
-          runtimeIdByStoredSessionId: { current: new Map() },
           sessions
         }),
       {
@@ -132,6 +161,84 @@ describe('useDesktopIntegrations', () => {
       }
     )
   }
+
+  it('forwards notification profile ownership to the approval response', () => {
+    render()
+
+    notificationAction?.({ actionId: 'approve', profile: 'profile-a', sessionId: 'shared-runtime' })
+
+    expect(respondToApprovalActionMock).toHaveBeenCalledWith('shared-runtime', 'approve', 'profile-a')
+  })
+
+  it('focuses only the durable session owned by the clicked notification profile', () => {
+    publishSessionState('shared-runtime', { ...createClientSessionState(), storedSessionId: 'stored-a' }, 'profile-a')
+    publishSessionState('shared-runtime', { ...createClientSessionState(), storedSessionId: 'stored-b' }, 'profile-b')
+    render()
+
+    focusSession?.({ profile: 'profile-a', sessionId: 'shared-runtime' })
+
+    expect(navigate).toHaveBeenCalledWith('/stored-a')
+    expect(navigate).not.toHaveBeenCalledWith('/stored-b')
+  })
+
+  it('resolves an evicted profile B projection through the profile B runtime binding', async () => {
+    requestGatewayForProfileMock.mockResolvedValue({
+      sessions: [{ id: 'rt-b', session_key: 'stored-b', status: 'idle' }]
+    })
+    render()
+
+    focusSession?.({ profile: 'profile-b', sessionId: 'rt-b' })
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith('/stored-b'))
+    expect(requestGatewayForProfileMock).toHaveBeenCalledWith('profile-b', 'session.active_list', {})
+    expect(navigate).not.toHaveBeenCalledWith('/rt-b')
+  })
+
+  it('fails closed when an explicit-profile runtime binding is stale', async () => {
+    requestGatewayForProfileMock.mockResolvedValue({ sessions: [] })
+    render()
+
+    focusSession?.({ profile: 'profile-b', sessionId: 'rt-b' })
+
+    await waitFor(() => expect(requestGatewayForProfileMock).toHaveBeenCalled())
+    expect(navigate).not.toHaveBeenCalled()
+  })
+
+  it('does not use profile A projection with the same runtime id for profile B', async () => {
+    publishSessionState('rt-b', { ...createClientSessionState(), storedSessionId: 'stored-a' }, 'profile-a')
+    requestGatewayForProfileMock.mockResolvedValue({ sessions: [] })
+    render()
+
+    focusSession?.({ profile: 'profile-b', sessionId: 'rt-b' })
+
+    await waitFor(() => expect(requestGatewayForProfileMock).toHaveBeenCalled())
+    expect(navigate).not.toHaveBeenCalledWith('/stored-a')
+    expect(navigate).not.toHaveBeenCalledWith('/rt-b')
+  })
+
+  it('retains the guarded bare-runtime fallback for legacy unprofiled notifications', () => {
+    render()
+
+    focusSession?.({ sessionId: 'legacy-stored-id' })
+
+    expect(navigate).toHaveBeenCalledWith('/legacy-stored-id')
+  })
+
+  it('opens notification profile B when profile A already has a tile with the same durable id', () => {
+    $selectedStoredSessionId.set('occupied-main')
+    $sessionTiles.set([{ profile: 'profile-a', runtimeId: 'runtime-a', storedSessionId: 'same' }])
+    publishSessionState('runtime-b', { ...createClientSessionState(), storedSessionId: 'same' }, 'profile-b')
+    render()
+
+    focusSession?.({ profile: 'profile-b', sessionId: 'runtime-b' })
+
+    expect($sessionTiles.get()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ profile: 'profile-a', storedSessionId: 'same' }),
+        expect.objectContaining({ profile: 'profile-b', storedSessionId: 'same' })
+      ])
+    )
+  })
 
   describe('profile-ready gate', () => {
     it('does NOT restore before profileReady is true', () => {

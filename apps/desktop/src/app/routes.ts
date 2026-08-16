@@ -181,8 +181,20 @@ export function primaryRouteSelectedSessionId(pathname: string, storeSelectedSes
   return routeSessionId(pathname) ?? storeSelectedSessionId
 }
 
-export function sessionRoute(sessionId: string): string {
-  return `${SESSION_ROUTE_PREFIX}${encodeURIComponent(sessionId)}`
+export function routeSessionProfile(search: string): string | undefined {
+  const params = new URLSearchParams(search)
+
+  if (!params.has('profile')) {
+    return undefined
+  }
+
+  return params.get('profile')?.trim() || 'default'
+}
+
+export function sessionRoute(sessionId: string, profile?: string): string {
+  const path = `${SESSION_ROUTE_PREFIX}${encodeURIComponent(sessionId)}`
+
+  return profile === undefined ? path : `${path}?profile=${encodeURIComponent(profile.trim() || 'default')}`
 }
 
 export function appViewForPath(pathname: string): AppView {

@@ -68,6 +68,33 @@ describe('terminal store persistence', () => {
     expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull()
   })
 
+  it('creates distinct mirrors for colliding profile process ids and closes only the requested owner', async () => {
+    const { $terminals, closeAgentTerminalByProc, ensureAgentTerminal } = await loadTerminalStore()
+
+    const idA = ensureAgentTerminal('profile-a', 'same-proc', 'A task')!
+    const idB = ensureAgentTerminal('profile-b', 'same-proc', 'B task')!
+
+    expect(idA).not.toBe(idB)
+    expect($terminals.get().filter(term => term.procId === 'same-proc')).toEqual([
+      expect.objectContaining({ id: idA, profile: 'profile-a' }),
+      expect.objectContaining({ id: idB, profile: 'profile-b' })
+    ])
+
+    expect(closeAgentTerminalByProc('profile-b', 'same-proc')).toBe(true)
+    expect($terminals.get().some(term => term.id === idA)).toBe(true)
+    expect($terminals.get().some(term => term.id === idB)).toBe(false)
+  })
+
+  it('does not dedupe an explicit default mirror against an omitted-profile legacy mirror', async () => {
+    const { $terminals, ensureAgentTerminal } = await loadTerminalStore()
+
+    const legacyId = ensureAgentTerminal('same-proc', 'legacy task')!
+    const defaultId = ensureAgentTerminal('default', 'same-proc', 'default task')!
+
+    expect(defaultId).not.toBe(legacyId)
+    expect($terminals.get().filter(term => term.procId === 'same-proc')).toHaveLength(2)
+  })
+
   it('tail-trims an oversized revive buffer to stay under the storage budget', async () => {
     const { $terminals, createTerminal, updateTerminalReviveBuffer } = await loadTerminalStore()
 

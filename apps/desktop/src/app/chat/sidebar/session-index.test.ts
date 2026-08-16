@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import type { SessionInfo } from '@/types/hermes'
 
-import { buildSessionByAnyId } from './session-index'
+import {
+  buildPinnedIdentitySet,
+  buildSessionByAnyId,
+  isPinnedSessionIdentity,
+  resolvePinnedSessions,
+  sidebarPinKey
+} from './session-index'
 
 const row = (id: string, extra: Partial<SessionInfo> = {}): SessionInfo =>
   ({ id, message_count: 1, source: 'cli', started_at: 0, title: id, ...extra }) as SessionInfo
@@ -28,6 +34,52 @@ describe('buildSessionByAnyId', () => {
     expect(index.get('tip')?.id).toBe('tip')
   })
 
+  it('resolves homonymous pins by profile-qualified durable identity', () => {
+    const index = buildSessionByAnyId(
+      [row('same', { profile: 'profile-a', title: 'A' }), row('same', { profile: 'profile-b', title: 'B' })],
+      [],
+      []
+    )
+
+    expect(index.get('profile-a\u0000same')?.title).toBe('A')
+    expect(index.get('profile-b\u0000same')?.title).toBe('B')
+  })
+
+  it('resolves a legacy naked homonym deterministically without treating every homonym as pinned', () => {
+    const sessions = [
+      row('same', { profile: 'profile-a', title: 'A' }),
+      row('same', { profile: 'profile-b', title: 'B' })
+    ]
+
+    const pinned = resolvePinnedSessions(['same'], buildSessionByAnyId(sessions, [], []))
+    const identities = buildPinnedIdentitySet(pinned)
+
+    expect(pinned.map(session => session.title)).toEqual(['B'])
+    expect(isPinnedSessionIdentity(sessions[0], identities)).toBe(false)
+    expect(isPinnedSessionIdentity(sessions[1], identities)).toBe(true)
+  })
+
+  it('keeps qualified homonymous pins independent across direct and lineage identities', () => {
+    const sessions = [
+      row('same', { _lineage_root_id: 'root', profile: 'profile-a', title: 'A' }),
+      row('same', { _lineage_root_id: 'root', profile: 'profile-b', title: 'B' })
+    ]
+
+    const index = buildSessionByAnyId(sessions, [], [])
+    const onlyB = resolvePinnedSessions(['profile-b\u0000root'], index)
+    const both = resolvePinnedSessions(['profile-a\u0000root', 'profile-b\u0000root'], index)
+
+    expect(onlyB.map(session => session.title)).toEqual(['B'])
+    expect(isPinnedSessionIdentity(sessions[0], buildPinnedIdentitySet(onlyB))).toBe(false)
+    expect(isPinnedSessionIdentity(sessions[1], buildPinnedIdentitySet(onlyB))).toBe(true)
+    expect(both.map(session => session.title)).toEqual(['A', 'B'])
+  })
+
+  it('builds qualified pin mutation keys only when the row provides a profile', () => {
+    expect(sidebarPinKey('same', 'profile-b')).toBe('profile-b\u0000same')
+    expect(sidebarPinKey('same')).toBe('same')
+  })
+
   it('lets a recents row win a direct id collision', () => {
     const index = buildSessionByAnyId(
       [row('dupe', { title: 'from recents' })],
@@ -44,5 +96,15 @@ describe('buildSessionByAnyId', () => {
     const index = buildSessionByAnyId([row('root')], [], [row('tip', { _lineage_root_id: 'root' })])
 
     expect(index.get('root')?.id).toBe('root')
+  })
+
+  it('does not let a qualified lineage alias clobber a qualified real row', () => {
+    const index = buildSessionByAnyId(
+      [row('tip', { _lineage_root_id: 'root', profile: 'profile-a' })],
+      [row('root', { profile: 'profile-a' })],
+      []
+    )
+
+    expect(index.get('profile-a\u0000root')?.id).toBe('root')
   })
 })

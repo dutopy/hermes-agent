@@ -3,6 +3,7 @@ import { type MutableRefObject, useLayoutEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ChatMessage } from '@/lib/chat-messages'
+import { $activeGatewayProfile } from '@/store/profile'
 import {
   $activeSessionStoredIdRotation,
   $currentFastMode,
@@ -35,6 +36,7 @@ interface HarnessProps {
 describe('useSessionStateCache — stored-id rotation provenance', () => {
   afterEach(() => {
     cleanup()
+    $activeGatewayProfile.set('default')
     setActiveSessionId(null)
     setActiveSessionStoredIdRotation(null)
   })
@@ -77,6 +79,44 @@ describe('useSessionStateCache — stored-id rotation provenance', () => {
     expect($activeSessionStoredIdRotation.get()).toBeNull()
     expect(cache.runtimeIdByStoredSessionIdRef.current.has('stored-A')).toBe(false)
     expect(cache.runtimeIdByStoredSessionIdRef.current.get('stored-A-next')).toBe('runtime-A')
+  })
+
+  it('does not rotate the foreground when another profile shares its runtime id', () => {
+    let cache!: Cache
+
+    $activeGatewayProfile.set('profile-a')
+    setActiveSessionId('shared-runtime')
+    render(
+      <Harness activeSessionId="shared-runtime" onReady={value => (cache = value)} selectedStoredSessionId="stored-a" />
+    )
+
+    act(() => {
+      cache.ensureSessionState('shared-runtime', 'stored-a', 'profile-a')
+      cache.ensureSessionState('shared-runtime', 'stored-b', 'profile-b')
+      cache.ensureSessionState('shared-runtime', 'stored-b-next', 'profile-b')
+    })
+
+    expect($activeSessionStoredIdRotation.get()).toBeNull()
+    expect(cache.getRuntimeIdForStoredSession('stored-a', 'profile-a')).toBe('shared-runtime')
+    expect(cache.getRuntimeIdForStoredSession('stored-b-next', 'profile-b')).toBe('shared-runtime')
+    expect(cache.sessionStateByRuntimeIdRef.current.get('profile-a\u0000shared-runtime')?.storedSessionId).toBe('stored-a')
+  })
+
+  it('maps the same stored id independently in each profile', () => {
+    let cache!: Cache
+
+    render(<Harness activeSessionId={null} onReady={value => (cache = value)} selectedStoredSessionId={null} />)
+
+    act(() => {
+      cache.ensureSessionState('runtime-a', 'shared-stored', 'profile-a')
+      cache.ensureSessionState('runtime-b', 'shared-stored', 'profile-b')
+    })
+
+    expect(cache.getRuntimeIdForStoredSession('shared-stored', 'profile-a')).toBe('runtime-a')
+    expect(cache.getRuntimeIdForStoredSession('shared-stored', 'profile-b')).toBe('runtime-b')
+
+    $activeGatewayProfile.set('profile-a')
+    expect(cache.getRuntimeIdForStoredSession('shared-stored')).toBe('runtime-a')
   })
 })
 

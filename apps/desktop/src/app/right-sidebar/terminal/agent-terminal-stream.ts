@@ -1,10 +1,13 @@
 // Live agent-terminal output, pushed from the backend as `agent.terminal.output`
 // events (see tui_gateway `_wire_agent_terminal_output`). Chunks route straight
-// to the matching read-only xterm, keyed by process id — no polling, no tail
-// truncation. A capped per-proc backlog lets a tab opened mid-stream replay what
-// it missed, and lets a closed-then-reopened tab restore its history.
+// to the matching read-only xterm, keyed by profile + process id. A capped
+// per-process backlog lets a tab opened mid-stream replay what it missed.
+
+import { normalizeProfileKey } from '@/store/profile'
 
 type Writer = (chunk: string) => void
+
+type StreamIdentity = { procId: string; profile?: null | string }
 
 const writers = new Map<string, Writer>()
 const backlog = new Map<string, string>()
@@ -14,87 +17,115 @@ const seededCommands = new Set<string>()
 
 const MAX_BACKLOG = 256_000
 
-/** A live agent terminal registers its xterm write and replays the backlog.
- *  Returns an idempotent unregister. */
-export function registerAgentTerminalWriter(procId: string, write: Writer): () => void {
-  writers.set(procId, write)
+const streamKey = ({ procId, profile }: StreamIdentity) =>
+  JSON.stringify(profile == null ? ['legacy', procId] : ['profile', normalizeProfileKey(profile), procId])
 
-  const history = backlog.get(procId)
+function identityFromArgs<T>(args: [procId: string, value: T] | [profile: string, procId: string, value: T]) {
+  return args.length === 2 ? { procId: args[0], value: args[1] } : { procId: args[1], profile: args[0], value: args[2] }
+}
+
+/** A live agent terminal registers its xterm write and replays the backlog.
+ * Returns an idempotent unregister. Omitted profile retains the legacy stream. */
+export function registerAgentTerminalWriter(
+  ...args: [procId: string, write: Writer] | [profile: string, procId: string, write: Writer]
+): () => void {
+  const { value: write, ...identity } = identityFromArgs(args)
+  const key = streamKey(identity)
+  writers.set(key, write)
+
+  const history = backlog.get(key)
 
   if (history) {
     write(history)
   }
 
   return () => {
-    if (writers.get(procId) === write) {
-      writers.delete(procId)
+    if (writers.get(key) === write) {
+      writers.delete(key)
     }
   }
 }
 
-/** Append a streamed chunk: buffer it (capped) for future opens and write it to
- *  the live terminal, if one is mounted. */
-export function writeAgentTerminalChunk(procId: string, chunk: string): void {
-  if (!procId || !chunk) {
+/** Append a streamed chunk to the profile-qualified backlog and mounted writer. */
+export function writeAgentTerminalChunk(
+  ...args: [procId: string, chunk: string] | [profile: string, procId: string, chunk: string]
+): void {
+  const { value: chunk, ...identity } = identityFromArgs(args)
+
+  if (!identity.procId || !chunk) {
     return
   }
 
-  const next = (backlog.get(procId) ?? '') + chunk
-  backlog.set(procId, next.length > MAX_BACKLOG ? next.slice(-MAX_BACKLOG) : next)
-  writers.get(procId)?.(chunk)
+  const key = streamKey(identity)
+  const next = (backlog.get(key) ?? '') + chunk
+  backlog.set(key, next.length > MAX_BACKLOG ? next.slice(-MAX_BACKLOG) : next)
+  writers.get(key)?.(chunk)
 }
 
 /** Seed the tab with the command immediately, so an agent terminal never opens
- *  as an empty void while stdout is still pending or not yet observed. */
-export function seedAgentTerminalCommand(procId: string, command: string): void {
+ * as an empty void while stdout is still pending or not yet observed. */
+export function seedAgentTerminalCommand(
+  ...args: [procId: string, command: string] | [profile: string, procId: string, command: string]
+): void {
+  const { value: command, ...identity } = identityFromArgs(args)
   const trimmed = command.trim()
+  const key = streamKey(identity)
 
-  if (!procId || !trimmed || seededCommands.has(procId)) {
+  if (!identity.procId || !trimmed || seededCommands.has(key)) {
     return
   }
 
-  seededCommands.add(procId)
+  seededCommands.add(key)
   const header = `$ ${trimmed}\r\n`
-  commandHeaders.set(procId, header)
-  writeAgentTerminalChunk(procId, header)
+  commandHeaders.set(key, header)
+  writeAgentTerminalChunkForIdentity(identity, header)
 }
 
-/** Ingest a full output snapshot from process.list/status-stack. This is the
- *  fallback for older/not-yet-restarted gateways and a seed for tabs opened
- *  after output already exists. If it extends our current backlog, append only
- *  the delta; if the registry's rolling tail slid, reset to that tail. */
-export function syncAgentTerminalSnapshot(procId: string, output: string): void {
-  if (!procId || !output) {
+function writeAgentTerminalChunkForIdentity(identity: StreamIdentity, chunk: string): void {
+  const key = streamKey(identity)
+  const next = (backlog.get(key) ?? '') + chunk
+  backlog.set(key, next.length > MAX_BACKLOG ? next.slice(-MAX_BACKLOG) : next)
+  writers.get(key)?.(chunk)
+}
+
+/** Ingest a full output snapshot from process.list/status-stack. */
+export function syncAgentTerminalSnapshot(
+  ...args: [procId: string, output: string] | [profile: string, procId: string, output: string]
+): void {
+  const { value: output, ...identity } = identityFromArgs(args)
+
+  if (!identity.procId || !output) {
     return
   }
 
-  const current = backlog.get(procId) ?? ''
-  const header = commandHeaders.get(procId) ?? ''
+  const key = streamKey(identity)
+  const current = backlog.get(key) ?? ''
+  const header = commandHeaders.get(key) ?? ''
   const body = header && current.startsWith(header) ? current.slice(header.length) : current
-  const previous = lastSnapshots.get(procId) ?? ''
+  const previous = lastSnapshots.get(key) ?? ''
 
   if (output === previous || output === body || body.endsWith(output)) {
-    lastSnapshots.set(procId, output)
+    lastSnapshots.set(key, output)
 
     return
   }
 
   if (output.startsWith(previous)) {
-    writeAgentTerminalChunk(procId, output.slice(previous.length))
-    lastSnapshots.set(procId, output)
+    writeAgentTerminalChunkForIdentity(identity, output.slice(previous.length))
+    lastSnapshots.set(key, output)
 
     return
   }
 
   if (output.startsWith(body)) {
-    writeAgentTerminalChunk(procId, output.slice(body.length))
-    lastSnapshots.set(procId, output)
+    writeAgentTerminalChunkForIdentity(identity, output.slice(body.length))
+    lastSnapshots.set(key, output)
 
     return
   }
 
   const next = `${header}${output}`.slice(-MAX_BACKLOG)
-  lastSnapshots.set(procId, output)
-  backlog.set(procId, next)
-  writers.get(procId)?.(`\x1bc${next}`)
+  lastSnapshots.set(key, output)
+  backlog.set(key, next)
+  writers.get(key)?.(`\x1bc${next}`)
 }

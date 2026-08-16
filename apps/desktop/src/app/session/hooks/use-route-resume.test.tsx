@@ -20,10 +20,11 @@ interface HarnessProps {
   freshDraftReady: boolean
   gatewayState: string
   locationPathname: string
-  resumeSession: (sessionId: string, focus: boolean) => Promise<unknown>
+  resumeSession: (sessionId: string, focus: boolean, profile?: string) => Promise<unknown>
   resumeFailedSessionId?: null | string
   resumeExhaustedSessionId?: null | string
   routedSessionId: null | string
+  routedSessionProfile?: string
   runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>>
   selectedStoredSessionId: null | string
   selectedStoredSessionIdRef: MutableRefObject<null | string>
@@ -196,6 +197,31 @@ describe('useRouteResume', () => {
 
     expect(resumeSession).toHaveBeenCalledTimes(1)
     expect(resumeSession).toHaveBeenCalledWith('session-2', true)
+  })
+
+  it('passes the route owner to resume without changing any global profile', () => {
+    const resumeSession = vi.fn(async () => undefined)
+
+    render(
+      <RouteResumeHarness
+        activeSessionId={null}
+        activeSessionIdRef={{ current: null }}
+        creatingSessionRef={{ current: false }}
+        currentView="chat"
+        freshDraftReady={false}
+        gatewayState="open"
+        locationPathname="/same"
+        resumeSession={resumeSession}
+        routedSessionId="same"
+        routedSessionProfile="profile-b"
+        runtimeIdByStoredSessionIdRef={{ current: new Map() }}
+        selectedStoredSessionId={null}
+        selectedStoredSessionIdRef={{ current: null }}
+        startFreshSessionDraft={vi.fn()}
+      />
+    )
+
+    expect(resumeSession).toHaveBeenCalledWith('same', true, 'profile-b')
   })
 
   it('arms the boot-restore one-shot for the FIRST resume only (⌘R tab persistence)', () => {

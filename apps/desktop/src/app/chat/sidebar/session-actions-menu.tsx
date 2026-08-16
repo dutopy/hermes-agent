@@ -30,6 +30,7 @@ import { PROFILE_SWATCHES } from '@/lib/profile-color'
 import { exportSession } from '@/lib/session-export'
 import { activeGateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { $projectTree, moveSessionToProject, projectIdForCwd, projectRootCwd } from '@/store/projects'
 import {
   $activeSessionId,
@@ -55,20 +56,22 @@ import type { SessionTitleResponse } from '../../types'
 // runtime session AND persists the row on demand, so it succeeds where REST
 // cannot. This mirrors the /title slash command's fix (use-prompt-actions.ts).
 //
-// We only take the RPC path for the ACTIVE/selected session: its runtime id is
-// known ($activeSessionId) and it lives on the active gateway, so there is no
-// profile-routing ambiguity. Every other row (already persisted, possibly on a
-// background profile) keeps the REST path, which handles profile scoping and a
-// non-empty title is required by the RPC (it rejects clears), so clears stay on
-// REST too.
+// We only take the RPC path for the unprofiled ACTIVE/selected primary session:
+// its runtime id is known ($activeSessionId) and it lives on the active gateway.
+// An explicit profile is an ownership assertion, including explicit `default`;
+// it must never borrow the foreground runtime/socket because durable ids and
+// runtime ids can collide across profiles. Explicit and background rows use the
+// profile-scoped REST mutation instead. Empty titles also stay on REST because
+// the RPC rejects clears.
 export async function renameSessionPreferringRpc(
   storedSessionId: string,
   title: string,
   profile?: string
 ): Promise<{ title?: string }> {
-  const isActiveRow = storedSessionId === $selectedStoredSessionId.get()
+  const isLegacyPrimary = profile === undefined
+  const isActiveRow = isLegacyPrimary && storedSessionId === $selectedStoredSessionId.get()
   const runtimeId = isActiveRow ? $activeSessionId.get() : null
-  const gateway = activeGateway()
+  const gateway = isLegacyPrimary ? activeGateway() : null
 
   if (title && runtimeId && gateway) {
     try {
@@ -87,7 +90,73 @@ export async function renameSessionPreferringRpc(
     }
   }
 
-  return renameSession(storedSessionId, title, profile)
+  const durableProfile = profile === undefined ? undefined : normalizeProfileKey(profile)
+
+  return renameSession(storedSessionId, title, durableProfile)
+}
+
+function renameRowMatches(
+  session: { id: string; profile?: null | string },
+  storedSessionId: string,
+  ownerProfile: string
+): boolean {
+  return session.id === storedSessionId && normalizeProfileKey(session.profile) === ownerProfile
+}
+
+/** Paint a rename immediately, then reconcile or roll back only the durable
+ * `(profile, stored id)` row that owns the action. The unprofiled compatibility
+ * caller resolves to the foreground profile for list identity while retaining
+ * its legacy RPC transport behavior above. */
+export async function renameSessionOptimistically(
+  storedSessionId: string,
+  title: string,
+  profile?: string
+): Promise<{ title?: string }> {
+  const ownerProfile = normalizeProfileKey(profile === undefined ? $activeGatewayProfile.get() : profile)
+  let foundPrevious = false
+  let previousTitle: null | string = null
+
+  setSessions(prev =>
+    prev.map(session => {
+      if (!renameRowMatches(session, storedSessionId, ownerProfile)) {
+        return session
+      }
+
+      if (!foundPrevious) {
+        foundPrevious = true
+        previousTitle = session.title ?? null
+      }
+
+      return { ...session, title: title || null }
+    })
+  )
+
+  try {
+    const result = await renameSessionPreferringRpc(storedSessionId, title, profile)
+    const finalTitle = result.title || title || ''
+
+    setSessions(prev =>
+      prev.map(session =>
+        renameRowMatches(session, storedSessionId, ownerProfile) && session.title === (title || null)
+          ? { ...session, title: finalTitle || null }
+          : session
+      )
+    )
+
+    return result
+  } catch (err) {
+    if (foundPrevious) {
+      setSessions(prev =>
+        prev.map(session =>
+          renameRowMatches(session, storedSessionId, ownerProfile) && session.title === (title || null)
+            ? { ...session, title: previousTitle }
+            : session
+        )
+      )
+    }
+
+    throw err
+  }
 }
 
 interface SessionActions {
@@ -117,10 +186,14 @@ interface SessionActions {
 // component so only an OPEN submenu subscribes to the stores (not every row's
 // menu). Reads/writes the override keyed by the DURABLE id so a color survives
 // compression; clearing falls back to the inherited project color.
-function SessionColorSwatches({ sessionId }: { sessionId: string }) {
+function sessionHasOwner(session: { profile?: null | string }, profile?: string): boolean {
+  return profile == null || normalizeProfileKey(session.profile) === normalizeProfileKey(profile)
+}
+
+function SessionColorSwatches({ sessionId, profile }: { sessionId: string; profile?: string }) {
   const { t } = useI18n()
   const overrides = useStore($sessionColorOverrides)
-  const session = useStore($sessions).find(s => sessionMatchesStoredId(s, sessionId))
+  const session = useStore($sessions).find(s => sessionHasOwner(s, profile) && sessionMatchesStoredId(s, sessionId))
   const durableId = session ? sessionPinId(session) : sessionId
 
   return (
@@ -144,7 +217,7 @@ function MoveToProjectItems({ kit, sessionId, profile }: { kit: MenuKit; session
   const { t } = useI18n()
   const p = t.sidebar.projects
   const tree = useStore($projectTree)
-  const session = useStore($sessions).find(s => sessionMatchesStoredId(s, sessionId))
+  const session = useStore($sessions).find(s => sessionHasOwner(s, profile) && sessionMatchesStoredId(s, sessionId))
   const cwd = session?.cwd?.trim() || ''
   const currentProjectId = cwd ? projectIdForCwd(cwd) : null
   const targets = tree.filter(node => node.id !== currentProjectId && !node.isNoProject && projectRootCwd(node))
@@ -191,10 +264,16 @@ function useSessionActions({
   const [renameOpen, setRenameOpen] = useState(false)
   const tiles = useStore($sessionTiles)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
+  const activeGatewayProfile = useStore($activeGatewayProfile)
 
   // Already showing as a tab somewhere (a tile, or loaded in main — main IS
   // a tab): offering "Open in new tab" again is noise.
-  const alreadyTabbed = sessionId === selectedStoredSessionId || tiles.some(tile => tile.storedSessionId === sessionId)
+  const selectedMatchesOwner =
+    sessionId === selectedStoredSessionId &&
+    (profile == null || normalizeProfileKey(profile) === normalizeProfileKey(activeGatewayProfile))
+
+  const alreadyTabbed =
+    selectedMatchesOwner || tiles.some(tile => sessionHasOwner(tile, profile) && tile.storedSessionId === sessionId)
 
   const spec = (partial: Omit<ActionItemSpec, 'onSelect'> & { onSelect: () => void }): ActionItemSpec => partial
 
@@ -212,7 +291,7 @@ function useSessionActions({
               // Stack into the MAIN zone as a tab (center dock; the strip
               // sticky-shows on gain) — the door to the tab bar. Focuses first
               // if the session is already on screen.
-              openSession(sessionId, () => undefined, 'tab')
+              openSession(sessionId, () => undefined, 'tab', profile)
             }
           })
         ]
@@ -225,7 +304,7 @@ function useSessionActions({
             label: r.newWindow,
             onSelect: () => {
               triggerHaptic('selection')
-              openSession(sessionId, () => undefined, 'window')
+              openSession(sessionId, () => undefined, 'window', profile)
             }
           })
         ]
@@ -379,7 +458,7 @@ function useSessionActions({
           <span>{t.sidebar.projects.menuAppearance}</span>
         </kit.SubTrigger>
         <kit.SubContent className="p-2">
-          <SessionColorSwatches sessionId={sessionId} />
+          <SessionColorSwatches profile={profile} sessionId={sessionId} />
         </kit.SubContent>
       </kit.Sub>
       <CopyButton
@@ -522,9 +601,7 @@ function RenameSessionDialog({ open, onOpenChange, sessionId, currentTitle, prof
     setSubmitting(true)
 
     try {
-      const result = await renameSessionPreferringRpc(sessionId, next, profile)
-      const finalTitle = result.title || next || ''
-      setSessions(prev => prev.map(s => (s.id === sessionId ? { ...s, title: finalTitle || null } : s)))
+      await renameSessionOptimistically(sessionId, next, profile)
       notify({ durationMs: 2_000, kind: 'success', message: r.renamed })
       onOpenChange(false)
     } catch (err) {

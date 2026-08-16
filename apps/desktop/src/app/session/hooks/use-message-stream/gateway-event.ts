@@ -4,6 +4,7 @@ import type { QueryClient } from '@tanstack/react-query'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
 import { readActivePreview } from '@/app/chat/right-rail/preview-reader'
+import { reclaimSessionSurfaceRuntime } from '@/app/contrib/hooks/use-session-tile-delegate'
 import { writeAgentTerminalChunk } from '@/app/right-sidebar/terminal/agent-terminal-stream'
 import { readActiveTerminal } from '@/app/right-sidebar/terminal/buffer'
 import { closeAgentTerminalByProc } from '@/app/right-sidebar/terminal/terminals'
@@ -23,7 +24,7 @@ import { billingCtaLabel, clearBillingBlock, runBillingRecovery, setBillingBlock
 import { clearClarifyRequest, normalizeChoices, setClarifyRequest, warnDroppedChoices } from '@/store/clarify'
 import { setSessionCompacting } from '@/store/compaction'
 import { refreshBackgroundProcesses } from '@/store/composer-status'
-import { $gateway } from '@/store/gateway'
+import { $gateway, gatewayForProfile } from '@/store/gateway'
 import { applyGoalStatusText } from '@/store/goals'
 import {
   notifyCronChanged,
@@ -58,14 +59,13 @@ import {
   setCurrentReasoningEffort,
   setCurrentServiceTier,
   setCurrentUsage,
-  setMessages,
   setSessions,
   setTerminalBackend,
   setTurnStartedAt,
   setWorkspaceCwdOwner,
   setYoloActive
 } from '@/store/session'
-import { dropSessionState } from '@/store/session-states'
+import { dropSessionState, sessionRuntimeStateKey } from '@/store/session-states'
 import { pruneDelegateFallbackSubagents, pruneFinishedSessionSubagents, upsertSubagent } from '@/store/subagents'
 import { reportMcpToolResult } from '@/store/suggestion-providers/repair'
 import { invalidateSkillSuggestionIndex } from '@/store/suggestion-providers/skill'
@@ -131,7 +131,7 @@ function sessionInfoDescribesSelectedSession(storedSessionId: string | undefined
  * billing-specific toast — never the generic "Hermes error" — with a smart CTA
  * (Nous → in-app Settings → Billing, other providers → their billing page).
  */
-function surfaceBillingBlock(sessionId: string, raw: unknown): void {
+function surfaceBillingBlock(sessionId: string, raw: unknown, profile?: null | string): void {
   if (!raw || typeof raw !== 'object') {
     return
   }
@@ -142,7 +142,7 @@ function surfaceBillingBlock(sessionId: string, raw: unknown): void {
     return
   }
 
-  setBillingBlock(sessionId, block)
+  setBillingBlock(sessionId, block, profile)
 
   const ctaCopy = {
     addCredits: translateNow('billingBlock.addCredits'),
@@ -208,54 +208,57 @@ interface GatewayEventDeps {
   compactedTurnRef: MutableRefObject<Set<string>>
   lastCwdInfoSessionRef: MutableRefObject<string | null>
   nativeSubagentSessionsRef: MutableRefObject<Set<string>>
-  appendAssistantDelta: (sessionId: string, delta: string) => void
-  appendReasoningDelta: (sessionId: string, delta: string, replace?: boolean) => void
+  appendAssistantDelta: (sessionId: string, delta: string, profile?: string) => void
+  appendReasoningDelta: (sessionId: string, delta: string, replace?: boolean, profile?: string) => void
   completeAssistantMessage: (
     sessionId: string,
     text: string,
     responsePreviewed?: boolean,
-    failure?: { error: string; partial: boolean }
+    failure?: { diskFull?: boolean; error: string; partial: boolean },
+    profile?: string
   ) => void
-  failAssistantMessage: (sessionId: string, errorMessage: string) => void
-  flushQueuedDeltas: (sessionId?: string) => void
-  finalizeInterimAssistantMessage: (sessionId: string, text: string) => void
+  failAssistantMessage: (sessionId: string, errorMessage: string, profile?: string) => void
+  flushQueuedDeltas: (sessionId?: string, profile?: string) => void
+  finalizeInterimAssistantMessage: (sessionId: string, text: string, profile?: string) => void
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
-  sessionInterrupted: (sessionId: string) => boolean
+  sessionInterrupted: (sessionId: string, profile?: string) => boolean
   sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>>
   updateSessionState: (
     sessionId: string,
     updater: (state: ClientSessionState) => ClientSessionState,
-    storedSessionId?: string | null
+    storedSessionId?: string | null,
+    profile?: string
   ) => ClientSessionState
   upsertToolCall: (
     sessionId: string,
     payload: GatewayEventPayload | undefined,
     phase: 'running' | 'complete',
-    sourceEventType?: string
+    sourceEventType?: string,
+    profile?: string
   ) => void
 }
 
 /** The gateway-event dispatcher, extracted from useMessageStream. */
 export function useGatewayEventHandler(deps: GatewayEventDeps) {
   const {
-    appendAssistantDelta,
-    appendReasoningDelta,
+    appendAssistantDelta: appendAssistantDeltaRaw,
+    appendReasoningDelta: appendReasoningDeltaRaw,
     activeGatewayProfile,
     activeSessionIdRef,
     compactedTurnRef,
     lastCwdInfoSessionRef,
     nativeSubagentSessionsRef,
-    completeAssistantMessage,
-    failAssistantMessage,
-    flushQueuedDeltas,
-    finalizeInterimAssistantMessage,
+    completeAssistantMessage: completeAssistantMessageRaw,
+    failAssistantMessage: failAssistantMessageRaw,
+    flushQueuedDeltas: flushQueuedDeltasRaw,
+    finalizeInterimAssistantMessage: finalizeInterimAssistantMessageRaw,
     queryClient,
     refreshHermesConfig,
-    sessionInterrupted,
+    sessionInterrupted: sessionInterruptedRaw,
     sessionStateByRuntimeIdRef,
-    updateSessionState,
-    upsertToolCall
+    updateSessionState: updateSessionStateRaw,
+    upsertToolCall: upsertToolCallRaw
   } = deps
 
   const unscopedStreamSessionIdRef = useRef<string | null>(null)
@@ -297,6 +300,32 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
 
   return useCallback(
     (event: RpcEvent) => {
+      const appendAssistantDelta: GatewayEventDeps['appendAssistantDelta'] = (sessionId, delta, profile) =>
+        appendAssistantDeltaRaw(sessionId, delta, profile ?? event.profile)
+      const appendReasoningDelta: GatewayEventDeps['appendReasoningDelta'] = (sessionId, delta, replace, profile) =>
+        appendReasoningDeltaRaw(sessionId, delta, replace, profile ?? event.profile)
+      const completeAssistantMessage: GatewayEventDeps['completeAssistantMessage'] = (
+        sessionId,
+        text,
+        responsePreviewed,
+        failure,
+        profile
+      ) => completeAssistantMessageRaw(sessionId, text, responsePreviewed, failure, profile ?? event.profile)
+      const failAssistantMessage: GatewayEventDeps['failAssistantMessage'] = (sessionId, message, profile) =>
+        failAssistantMessageRaw(sessionId, message, profile ?? event.profile)
+      const flushQueuedDeltas: GatewayEventDeps['flushQueuedDeltas'] = (sessionId, profile) =>
+        flushQueuedDeltasRaw(sessionId, profile ?? event.profile)
+      const finalizeInterimAssistantMessage: GatewayEventDeps['finalizeInterimAssistantMessage'] = (
+        sessionId,
+        text,
+        profile
+      ) => finalizeInterimAssistantMessageRaw(sessionId, text, profile ?? event.profile)
+      const sessionInterrupted: GatewayEventDeps['sessionInterrupted'] = (sessionId, profile) =>
+        sessionInterruptedRaw(sessionId, profile ?? event.profile)
+      const updateSessionState: GatewayEventDeps['updateSessionState'] = (sessionId, updater, storedId, profile) =>
+        updateSessionStateRaw(sessionId, updater, storedId, profile ?? event.profile)
+      const upsertToolCall: GatewayEventDeps['upsertToolCall'] = (sessionId, toolPayload, phase, sourceType, profile) =>
+        upsertToolCallRaw(sessionId, toolPayload, phase, sourceType, profile ?? event.profile)
       const payload = event.payload as GatewayEventPayload | undefined
       const explicitSid = event.session_id || ''
 
@@ -314,18 +343,22 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       }
 
       const sessionId = route.sessionId
-      const isActiveEvent = !!sessionId && sessionId === activeSessionIdRef.current
+      const runtimeKey = sessionId ? sessionRuntimeStateKey(event.profile, sessionId) : ''
+      const eventGateway = event.profile ? gatewayForProfile(event.profile) : $gateway.get()
+      const isActiveProfile =
+        !event.profile || normalizeProfileKey(event.profile) === normalizeProfileKey(activeGatewayProfile)
+      const isActiveEvent = isActiveProfile && !!sessionId && sessionId === activeSessionIdRef.current
 
       // Mid-turn compaction does not emit another message.start. The first
       // model output or tool event proves summarization has finished and the
       // turn has resumed, so retire the phase label without waiting for the
       // whole turn to complete.
-      if (sessionId && COMPACTION_RESUME_EVENT_TYPES.has(event.type) && compactedTurnRef.current.has(sessionId)) {
-        setSessionCompacting(sessionId, false)
+      if (sessionId && COMPACTION_RESUME_EVENT_TYPES.has(event.type) && compactedTurnRef.current.has(runtimeKey)) {
+        setSessionCompacting(sessionId, false, event.profile)
       }
 
       if (sessionId && DRAFT_SUPERSEDING_EVENT_TYPES.has(event.type)) {
-        setSessionDraftingTool(sessionId, '')
+        setSessionDraftingTool(sessionId, '', event.profile)
       }
 
       if (event.type === 'gateway.ready') {
@@ -387,7 +420,11 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         const reclaimedRuntimeId = String((payload as { session_id?: string } | undefined)?.session_id ?? '')
 
         if (reclaimedRuntimeId) {
-          dropSessionState(reclaimedRuntimeId)
+          dropSessionState(reclaimedRuntimeId, event.profile)
+
+          if (event.profile) {
+            reclaimSessionSurfaceRuntime(event.profile, reclaimedRuntimeId)
+          }
         }
 
         // The row's ended_at moved, so refresh the lists that render it.
@@ -411,7 +448,9 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         // that never changed. Only a genuine VALUE change (vs the session's own
         // cached runtime state, captured before the state patch below applies;
         // composer atoms as the fallback for an uncached session) invalidates.
-        const knownState = sessionId ? sessionStateByRuntimeIdRef.current.get(sessionId) : undefined
+        const knownState = sessionId
+          ? sessionStateByRuntimeIdRef.current.get(sessionRuntimeStateKey(event.profile, sessionId))
+          : undefined
         const modelValueChanged = modelChanged && payload!.model !== (knownState?.model ?? $currentModel.get())
 
         const providerValueChanged =
@@ -586,7 +625,9 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         if (modelValueChanged || providerValueChanged) {
           void queryClient.invalidateQueries({
             queryKey:
-              explicitSid && sessionId ? modelOptionsQueryKey(activeGatewayProfile, sessionId) : ['model-options']
+              explicitSid && sessionId
+                ? modelOptionsQueryKey(event.profile ?? activeGatewayProfile, sessionId)
+                : ['model-options']
           })
         }
       } else if (event.type === 'message.start') {
@@ -594,14 +635,14 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           return
         }
 
-        flushQueuedDeltas(sessionId)
-        pruneFinishedSessionSubagents(sessionId)
-        setSessionCompacting(sessionId, false)
-        compactedTurnRef.current.delete(sessionId)
-        nativeSubagentSessionsRef.current.delete(sessionId)
+        flushQueuedDeltas(sessionId, event.profile)
+        pruneFinishedSessionSubagents(sessionId, event.profile)
+        setSessionCompacting(sessionId, false, event.profile)
+        compactedTurnRef.current.delete(runtimeKey)
+        nativeSubagentSessionsRef.current.delete(runtimeKey)
         // A fresh turn on this session optimistically clears its billing wall;
         // if credits are still exhausted the next failure re-raises it.
-        clearBillingBlock(sessionId)
+        clearBillingBlock(sessionId, event.profile)
 
         if (isActiveEvent) {
           triggerHaptic('streamStart')
@@ -628,14 +669,14 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
             interimBoundaryPending: false,
             turnStartedAt: Date.now()
           }
-        })
+        }, undefined, event.profile)
 
         if (isActiveEvent) {
           setTurnStartedAt(Date.now())
         }
       } else if (event.type === 'message.delta') {
         if (sessionId) {
-          appendAssistantDelta(sessionId, coerceGatewayText(payload?.text))
+          appendAssistantDelta(sessionId, coerceGatewayText(payload?.text), event.profile)
         }
       } else if (event.type === 'message.interim') {
         // The agent emitted interim assistant commentary (text alongside tool
@@ -643,11 +684,11 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         // Finalize it as its own sealed bubble so message.complete doesn't wipe
         // it — the text was already streamed via message.delta and is visible.
         if (sessionId) {
-          flushQueuedDeltas(sessionId)
+          flushQueuedDeltas(sessionId, event.profile)
           const text = coerceGatewayText(payload?.text)
 
           if (text) {
-            finalizeInterimAssistantMessage(sessionId, text)
+            finalizeInterimAssistantMessage(sessionId, text, event.profile)
           }
         }
       } else if (event.type === 'thinking.delta') {
@@ -663,7 +704,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
       } else if (event.type === 'reasoning.delta') {
         if (sessionId) {
-          appendReasoningDelta(sessionId, coerceThinkingText(payload?.text))
+          appendReasoningDelta(sessionId, coerceThinkingText(payload?.text), false, event.profile)
         }
 
         if (isActiveEvent) {
@@ -671,7 +712,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
       } else if (event.type === 'reasoning.available') {
         if (sessionId) {
-          appendReasoningDelta(sessionId, coerceThinkingText(payload?.text), true)
+          appendReasoningDelta(sessionId, coerceThinkingText(payload?.text), true, event.profile)
         }
 
         if (isActiveEvent) {
@@ -760,15 +801,15 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         // (e.g. interrupted, or the approval already resolved). Scoped to the
         // session so a background turn finishing can't wipe the active chat's
         // prompt, and vice versa.
-        clearAllPrompts(sessionId)
-        clearClarifyRequest(undefined, sessionId)
+        clearAllPrompts(sessionId, event.profile)
+        clearClarifyRequest(undefined, sessionId, event.profile)
         // Turn ended without a final `todo` update — drop a still-unfinished
         // list so "Tasks N/M" doesn't stay pinned above the composer with the
         // last item stuck pending/in_progress. Finished lists keep their linger.
-        clearActiveSessionTodos(sessionId)
-        setSessionCompacting(sessionId, false)
+        clearActiveSessionTodos(sessionId, event.profile)
+        setSessionCompacting(sessionId, false, event.profile)
 
-        flushQueuedDeltas(sessionId)
+        flushQueuedDeltas(sessionId, event.profile)
 
         // Keyed by session so only one window beeps when several are open.
         playCompletionSound(sessionId)
@@ -778,20 +819,30 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         // Terminal error frames (status "error") carry the failure in
         // structured fields: `error` is the message, and `partial` marks
         // `text` as streamed output to keep rather than the error string.
+        const rawFailureError = coerceGatewayText(payload?.error).trim() || finalText || 'Hermes reported an error'
         const failure =
           payload?.status === 'error'
             ? {
-                error: coerceGatewayText(payload.error).trim() || finalText || 'Hermes reported an error',
+                diskFull: isDiskFullErrorMessage(rawFailureError),
+                error: event.profile ? 'Hermes reported an error' : rawFailureError,
                 partial: Boolean(payload.partial)
               }
             : undefined
 
-        completeAssistantMessage(sessionId, finalText, payload?.response_previewed, failure)
+        if (failure && event.profile) {
+          console.error('[gateway] Profiled terminal completion error', {
+            error: rawFailureError,
+            profile: event.profile,
+            sessionId
+          })
+        }
+
+        completeAssistantMessage(sessionId, finalText, payload?.response_previewed, failure, event.profile)
 
         // Structured billing wall forwarded by the gateway (out of credits /
         // payment required) — cache it + raise a billing-specific toast.
         if (payload?.billing) {
-          surfaceBillingBlock(sessionId, payload.billing)
+          surfaceBillingBlock(sessionId, payload.billing, event.profile)
         }
 
         if (isActiveEvent) {
@@ -831,7 +882,14 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         const nextTitle = typeof payload?.title === 'string' ? payload.title.trim() : ''
 
         if (storedId && nextTitle) {
-          setSessions(prev => prev.map(s => (sessionMatchesStoredId(s, storedId) ? { ...s, title: nextTitle } : s)))
+          setSessions(prev =>
+            prev.map(session => {
+              const ownsEvent =
+                !event.profile || normalizeProfileKey(session.profile) === normalizeProfileKey(event.profile)
+
+              return ownsEvent && sessionMatchesStoredId(session, storedId) ? { ...session, title: nextTitle } : session
+            })
+          )
         }
       } else if (event.type === 'tool.generating') {
         // Announced while the model is still emitting the call's JSON, so it
@@ -847,7 +905,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           return
         }
 
-        setSessionDraftingTool(sessionId, typeof payload?.name === 'string' ? payload.name : '')
+        setSessionDraftingTool(sessionId, typeof payload?.name === 'string' ? payload.name : '', event.profile)
 
         if (isActiveEvent) {
           setPetActivity({ reasoning: false, toolRunning: true })
@@ -881,7 +939,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           // terminal/process tool calls are the only things that spawn or reap
           // background processes — sync the composer status stack right after.
           if (!sessionInterrupted(sessionId) && (payload?.name === 'terminal' || payload?.name === 'process')) {
-            void refreshBackgroundProcesses(sessionId)
+            void refreshBackgroundProcesses(sessionId, event.profile)
           }
         }
 
@@ -907,7 +965,15 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
 
         if (typeof payload?.inline_diff === 'string' && payload.inline_diff.trim()) {
-          recordToolDiff(payload.tool_id || payload.name || '', payload.inline_diff)
+          const toolCallId = payload.tool_id || payload.name || ''
+
+          if (!event.profile || sessionId) {
+            recordToolDiff(
+              toolCallId,
+              payload.inline_diff,
+              event.profile && sessionId ? { profile: event.profile, runtimeId: sessionId } : undefined
+            )
+          }
         }
 
         // A file-mutating tool just finished — nudge the git-mirroring surfaces
@@ -918,16 +984,17 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
       } else if (SUBAGENT_EVENT_TYPES.has(event.type)) {
         if (sessionId && payload && !sessionInterrupted(sessionId)) {
-          if (!nativeSubagentSessionsRef.current.has(sessionId)) {
-            pruneDelegateFallbackSubagents(sessionId)
+          if (!nativeSubagentSessionsRef.current.has(runtimeKey)) {
+            pruneDelegateFallbackSubagents(sessionId, event.profile)
           }
 
-          nativeSubagentSessionsRef.current.add(sessionId)
+          nativeSubagentSessionsRef.current.add(runtimeKey)
           upsertSubagent(
             sessionId,
             payload as Record<string, unknown>,
             event.type === 'subagent.spawn_requested' || event.type === 'subagent.start',
-            event.type
+            event.type,
+            event.profile
           )
         }
       } else if (event.type === 'clarify.request') {
@@ -955,6 +1022,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
             requestId,
             question,
             choices: choices.length > 0 ? choices : null,
+            profile: event.profile,
             sessionId: sessionId ?? null
           })
 
@@ -979,6 +1047,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           dispatchNativeNotification({
             body: question,
             kind: 'input',
+            profile: event.profile,
             sessionId,
             title: translateNow('notifications.native.inputTitle')
           })
@@ -996,7 +1065,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         const reason = typeof payload?.reason === 'string' ? payload.reason : ''
 
         if (requestId && server) {
-          setMcpSetupRequest({ action, reason, requestId, server, sessionId: sessionId ?? null })
+          setMcpSetupRequest({ action, profile: event.profile, reason, requestId, server, sessionId: sessionId ?? null })
 
           if (sessionId) {
             upsertToolCall(
@@ -1010,6 +1079,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           dispatchNativeNotification({
             body: reason || server,
             kind: 'input',
+            profile: event.profile,
             sessionId,
             title: translateNow('notifications.native.inputTitle')
           })
@@ -1032,6 +1102,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
             : undefined,
           command,
           description,
+          profile: event.profile,
           sessionId: sessionId ?? null,
           smartDenied: payload?.smart_denied === true
         })
@@ -1047,6 +1118,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           ],
           body: command || description,
           kind: 'approval',
+          profile: event.profile,
           sessionId,
           title: translateNow('notifications.native.approvalTitle')
         })
@@ -1056,7 +1128,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         const requestId = typeof payload?.request_id === 'string' ? payload.request_id : ''
 
         if (requestId) {
-          setSudoRequest({ requestId, sessionId: sessionId ?? null })
+          setSudoRequest({ profile: event.profile, requestId, sessionId: sessionId ?? null })
 
           if (sessionId) {
             updateSessionState(sessionId, state => ({ ...state, needsInput: true }))
@@ -1065,6 +1137,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           dispatchNativeNotification({
             body: translateNow('notifications.native.inputBody'),
             kind: 'input',
+            profile: event.profile,
             sessionId,
             title: translateNow('notifications.native.inputTitle')
           })
@@ -1081,6 +1154,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           setSecretRequest({
             requestId,
             envVar,
+            profile: event.profile,
             prompt: promptText,
             sessionId: sessionId ?? null
           })
@@ -1092,6 +1166,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           dispatchNativeNotification({
             body: promptText || envVar || translateNow('notifications.native.inputBody'),
             kind: 'input',
+            profile: event.profile,
             sessionId,
             title: translateNow('notifications.native.inputTitle')
           })
@@ -1106,7 +1181,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           const count = typeof payload?.count === 'number' ? payload.count : undefined
           const result = readActiveTerminal({ start, count })
 
-          void $gateway.get()?.request('terminal.read.respond', {
+          void eventGateway?.request('terminal.read.respond', {
             request_id: requestId,
             text: result ? JSON.stringify(result) : ''
           })
@@ -1121,7 +1196,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           const count = typeof payload?.count === 'number' ? payload.count : undefined
 
           void readActivePreview({ count, start }).then(result => {
-            void $gateway.get()?.request('preview.read.respond', {
+            void eventGateway?.request('preview.read.respond', {
               request_id: requestId,
               text: result ? JSON.stringify(result) : ''
             })
@@ -1137,7 +1212,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           const read = window.hermesDesktop?.readWindowBelow
 
           const answer = (result: unknown) =>
-            $gateway.get()?.request('window.read.respond', {
+            eventGateway?.request('window.read.respond', {
               request_id: requestId,
               text: result ? JSON.stringify(result) : ''
             })
@@ -1149,11 +1224,19 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
       } else if (event.type === 'agent.terminal.output') {
         // Live chunk from a background process → its read-only agent terminal tab.
-        writeAgentTerminalChunk(payload?.process_id ?? '', payload?.chunk ?? '')
+        if (event.profile !== undefined && event.profile !== null) {
+          writeAgentTerminalChunk(event.profile, payload?.process_id ?? '', payload?.chunk ?? '')
+        } else {
+          writeAgentTerminalChunk(payload?.process_id ?? '', payload?.chunk ?? '')
+        }
       } else if (event.type === 'terminal.close') {
         // Agent closed its own read-only tab via the desktop-gated close_terminal tool.
         // The process is untouched — this only drops the view.
-        closeAgentTerminalByProc(payload?.process_id ?? '')
+        if (event.profile !== undefined && event.profile !== null) {
+          closeAgentTerminalByProc(event.profile, payload?.process_id ?? '')
+        } else {
+          closeAgentTerminalByProc(payload?.process_id ?? '')
+        }
       } else if (event.type === 'pane.reveal') {
         // Agent revealed a pane via the desktop-gated focus_pane tool, in
         // response to an explicit user request. Active session only — a
@@ -1174,54 +1257,63 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
           const nextReactions = Array.isArray(payload?.reactions) ? payload.reactions : []
           const reactedRole = payload?.role === 'assistant' ? 'assistant' : 'user'
 
-          setMessages(messages => {
-            // Preferred leg: the message already knows its durable row id
-            // (rehydrated transcript, or a live row that has round-tripped).
-            const byRowId = messages.find(message => message.rowId === reactedRowId)
+          if (sessionId) {
+            updateSessionState(sessionId, state => {
+              const messages = state.messages
+              // Preferred leg: the message already knows its durable row id
+              // (rehydrated transcript, or a live row that has round-tripped).
+              const byRowId = messages.find(message => message.rowId === reactedRowId)
 
-            if (byRowId) {
-              // Overlay survives the end-of-turn resume, which rebuilds from
-              // in-memory history that doesn't carry this mid-turn DB write.
-              recordAgentReaction(reactedRowId, nextReactions)
+              if (byRowId) {
+                // Overlay survives the end-of-turn resume, which rebuilds from
+                // in-memory history that doesn't carry this mid-turn DB write.
+                recordAgentReaction(reactedRowId, nextReactions, event.profile, state.storedSessionId)
 
-              return messages.map(message =>
-                message.rowId === reactedRowId ? { ...message, reactions: nextReactions } : message
+                return {
+                  ...state,
+                  messages: messages.map(message =>
+                    message.rowId === reactedRowId ? { ...message, reactions: nextReactions } : message
+                  )
+                }
+              }
+
+              // Live leg: the targeted message is still optimistic (no rowId —
+              // it hasn't round-tripped through a resume). The agent's default
+              // target is the newest message of that role, so stamp the reaction
+              // AND the now-known row id onto it. Without this the event matches
+              // nothing and the reaction only appears after a reload.
+              const lastIndex = messages.findLastIndex(
+                message => message.role === reactedRole && message.rowId === undefined
               )
-            }
 
-            // Live leg: the targeted message is still optimistic (no rowId —
-            // it hasn't round-tripped through a resume). The agent's default
-            // target is the newest message of that role, so stamp the reaction
-            // AND the now-known row id onto it. Without this the event matches
-            // nothing and the reaction only appears after a reload.
-            const lastIndex = messages.findLastIndex(
-              message => message.role === reactedRole && message.rowId === undefined
-            )
+              if (lastIndex === -1) {
+                return state
+              }
 
-            if (lastIndex === -1) {
-              return messages
-            }
+              recordAgentReaction(reactedRowId, nextReactions, event.profile, state.storedSessionId)
 
-            recordAgentReaction(reactedRowId, nextReactions)
-
-            return messages.map((message, index) =>
-              index === lastIndex ? { ...message, rowId: reactedRowId, reactions: nextReactions } : message
-            )
-          })
+              return {
+                ...state,
+                messages: messages.map((message, index) =>
+                  index === lastIndex ? { ...message, rowId: reactedRowId, reactions: nextReactions } : message
+                )
+              }
+            })
+          }
         }
       } else if (event.type === 'status.update') {
         if (sessionId && payload?.kind === 'compacting') {
-          setSessionCompacting(sessionId, true)
-          compactedTurnRef.current.add(sessionId)
+          setSessionCompacting(sessionId, true, event.profile)
+          compactedTurnRef.current.add(runtimeKey)
         } else if (sessionId && payload?.kind === 'compacted') {
-          setSessionCompacting(sessionId, false)
-          compactedTurnRef.current.delete(sessionId)
+          setSessionCompacting(sessionId, false, event.profile)
+          compactedTurnRef.current.delete(runtimeKey)
         } else if (sessionId && payload?.kind === 'process') {
           // The gateway's notification poller announces background process
           // completions / watch matches here — re-sync the status stack.
-          void refreshBackgroundProcesses(sessionId)
+          void refreshBackgroundProcesses(sessionId, event.profile)
         } else if (sessionId && payload?.kind === 'goal') {
-          applyGoalStatusText(sessionId, coerceGatewayText(payload?.text))
+          applyGoalStatusText(sessionId, coerceGatewayText(payload?.text), event.profile)
         }
       } else if (event.type === 'review.summary') {
         // Self-improvement background review saved something to memory/skills
@@ -1288,18 +1380,31 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         // straight to dismissNotification(key).
         clearAgentNotice((event.payload as AgentNoticePayload | undefined)?.key)
       } else if (event.type === 'error') {
-        const errorMessage = payload?.message || 'Hermes reported an error'
-        const looksLikeProviderSetup = isProviderSetupErrorMessage(errorMessage)
+        const rawErrorMessage = payload?.message || 'Hermes reported an error'
+        const errorMessage = event.profile ? 'Hermes reported an error' : rawErrorMessage
+        const looksLikeProviderSetup = isProviderSetupErrorMessage(rawErrorMessage)
+
+        // Profile-owned runtimes may be background surfaces. Their backend
+        // detail can contain paths, credentials, or provider responses, so keep
+        // it in developer logs and publish only stable copy to renderer/native
+        // surfaces. Unprofiled primary events retain their historical detail.
+        if (event.profile) {
+          console.error('[gateway] Profiled session error', {
+            error: rawErrorMessage,
+            profile: event.profile,
+            sessionId
+          })
+        }
 
         // A turn that errors out has also ended — drop any open blocking prompt
         // for this session so an approval/sudo/secret overlay can't linger past
         // the failed turn (same intent as the message.complete clear).
         if (sessionId) {
-          clearAllPrompts(sessionId)
-          clearClarifyRequest(undefined, sessionId)
-          clearActiveSessionTodos(sessionId)
-          setSessionCompacting(sessionId, false)
-          compactedTurnRef.current.delete(sessionId)
+          clearAllPrompts(sessionId, event.profile)
+          clearClarifyRequest(undefined, sessionId, event.profile)
+          clearActiveSessionTodos(sessionId, event.profile)
+          setSessionCompacting(sessionId, false, event.profile)
+          compactedTurnRef.current.delete(runtimeKey)
         }
 
         if (isActiveEvent) {
@@ -1310,14 +1415,15 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         dispatchNativeNotification({
           body: errorMessage,
           kind: 'turnError',
+          profile: event.profile,
           sessionId,
           title: translateNow('notifications.native.turnErrorTitle')
         })
 
-        if (looksLikeProviderSetup) {
-          requestDesktopOnboarding(errorMessage)
-        } else if (isDiskFullErrorMessage(errorMessage)) {
-          notifyError(new Error(errorMessage), translateNow('notifications.errors.diskFull'))
+        if (!event.profile && looksLikeProviderSetup) {
+          requestDesktopOnboarding(rawErrorMessage)
+        } else if (!event.profile && isDiskFullErrorMessage(rawErrorMessage)) {
+          notifyError(new Error(rawErrorMessage), translateNow('notifications.errors.diskFull'))
         } else {
           // Toast globally, not just when the failing thread is focused: a
           // turn-ending error (e.g. out of funds) blocks every thread, so the
@@ -1342,23 +1448,23 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       }
     },
     [
-      appendAssistantDelta,
-      appendReasoningDelta,
+      appendAssistantDeltaRaw,
+      appendReasoningDeltaRaw,
       activeSessionIdRef,
       activeGatewayProfile,
       compactedTurnRef,
-      completeAssistantMessage,
-      failAssistantMessage,
-      finalizeInterimAssistantMessage,
-      flushQueuedDeltas,
+      completeAssistantMessageRaw,
+      failAssistantMessageRaw,
+      finalizeInterimAssistantMessageRaw,
+      flushQueuedDeltasRaw,
       lastCwdInfoSessionRef,
       nativeSubagentSessionsRef,
       queryClient,
       scheduleConfigRefresh,
-      sessionInterrupted,
+      sessionInterruptedRaw,
       sessionStateByRuntimeIdRef,
-      updateSessionState,
-      upsertToolCall
+      updateSessionStateRaw,
+      upsertToolCallRaw
     ]
   )
 }

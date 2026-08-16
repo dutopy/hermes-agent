@@ -3,8 +3,11 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { DropdownMenu, DropdownMenuContent } from '@/components/ui/dropdown-menu'
+import { createClientSessionState } from '@/lib/chat-runtime'
+import { $activeGatewayProfile } from '@/store/profile'
 import { $collapsedProviders, toggleCollapsedProvider } from '@/store/provider-collapse'
 import { $activeSessionId, $currentModel, $currentProvider } from '@/store/session'
+import { $sessionStates, publishSessionState } from '@/store/session-states'
 
 import { ModelMenuPanel } from './model-menu-panel'
 
@@ -42,7 +45,9 @@ const GOOGLE_PROVIDER = {
 const MOCK_PROVIDERS = [DEEPSEEK_PROVIDER, GOOGLE_PROVIDER, MOA_PROVIDER]
 
 beforeEach(() => {
+  $activeGatewayProfile.set('profile-a')
   $activeSessionId.set('runtime-1')
+  $sessionStates.set({})
   $currentModel.set('')
   $currentProvider.set('')
   $collapsedProviders.set([])
@@ -87,6 +92,11 @@ describe('ModelMenuPanel MoA presets', () => {
   it('shows the check on the preset that matches the current moa selection', async () => {
     $currentProvider.set('moa')
     $currentModel.set('BeastMode')
+    publishSessionState(
+      'runtime-1',
+      { ...createClientSessionState(), model: 'BeastMode', provider: 'moa' },
+      'profile-a'
+    )
     const { content } = renderPanel()
 
     const row = await content.findByText('MoA: BeastMode')
@@ -128,6 +138,11 @@ describe('ModelMenuPanel current selection', () => {
   it('keeps the checkmark on the live SessionView model when a stale options response disagrees', async () => {
     $currentProvider.set('google')
     $currentModel.set('gemini-3.1-pro')
+    publishSessionState(
+      'runtime-1',
+      { ...createClientSessionState(), model: 'gemini-3.1-pro', provider: 'google' },
+      'profile-a'
+    )
     getGlobalModelOptions.mockResolvedValue({
       model: 'deepseek-chat',
       provider: 'deepseek',

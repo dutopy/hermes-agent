@@ -6,20 +6,26 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SessionInfo } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import type * as ChatRuntime from '@/lib/chat-runtime'
+import type { TodoItem } from '@/lib/todos'
 import type * as ComposerStatusStore from '@/store/composer-status'
 import type * as SessionStore from '@/store/session'
 import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
 import type * as SessionStatesStore from '@/store/session-states'
+import { $todosBySession, setSessionTodos } from '@/store/todos'
 import type * as WindowsStore from '@/store/windows'
 
 import { SidebarSessionRow } from './session-row'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  $todosBySession.set({})
+})
 
 vi.mock('@/i18n', () => ({
   useI18n: () => ({
     t: {
       sidebar: {
+        projects: { home: 'Home' },
         row: {
           ageMin: 'm',
           ageNow: 'now',
@@ -30,6 +36,7 @@ vi.mock('@/i18n', () => ({
           needsInput: 'Needs input',
           sessionActions: 'Session actions',
           sessionRunning: 'Running',
+          todoProgress: 'Todo progress',
           waitingForAnswer: 'Waiting for answer'
         }
       }
@@ -170,7 +177,7 @@ describe('SidebarSessionRow running arc', () => {
   })
 
   it('paints the arc while the session is running', () => {
-    publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
+    publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true }, 'default')
 
     const { container } = renderRow(makeSession({ title: 'Running' }))
 
@@ -200,15 +207,73 @@ describe('SidebarSessionRow running arc', () => {
     sessionTitle.mockClear()
 
     act(() => {
-      publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true })
+      publishSessionState('rt1', { ...createClientSessionState('s1'), busy: true }, 'default')
     })
 
     expect(sessionTitle).toHaveBeenCalledTimes(1)
     expect(sessionTitle).toHaveBeenCalledWith(expect.objectContaining({ id: 's1' }))
   })
+
+  it('does not paint a bare legacy status onto an explicit profile without qualified state', () => {
+    act(() => {
+      publishSessionState('legacy-runtime', { ...createClientSessionState('same'), busy: true })
+      publishSessionState('owned-runtime', { ...createClientSessionState('same'), busy: true }, 'profile-a')
+    })
+
+    const { container } = render(
+      <>
+        {['profile-a', 'profile-b'].map(profile => (
+          <SidebarSessionRow
+            isPinned={false}
+            isSelected={false}
+            key={profile}
+            onArchive={noop}
+            onDelete={noop}
+            onPin={noop}
+            onResume={noop}
+            session={makeSession({ id: 'same', profile, title: profile })}
+          />
+        ))}
+      </>
+    )
+
+    expect(container.querySelectorAll('.arc-row')).toHaveLength(1)
+    expect(screen.getAllByRole('status', { name: 'Running' })).toHaveLength(1)
+  })
 })
 
 describe('SidebarSessionRow', () => {
+  it('does not paint bare legacy todo progress onto an explicit profile without qualified progress', () => {
+    const pending = (id: string): TodoItem => ({ content: id, id, status: 'in_progress' })
+    const completed = (id: string): TodoItem => ({ content: id, id, status: 'completed' })
+
+    act(() => {
+      setSessionTodos('same', [pending('legacy')])
+      setSessionTodos('same', [completed('owned-done'), pending('owned-next')], 'profile-a')
+    })
+
+    render(
+      <>
+        {['profile-a', 'profile-b'].map(profile => (
+          <SidebarSessionRow
+            card
+            isPinned={false}
+            isSelected={false}
+            key={profile}
+            onArchive={noop}
+            onDelete={noop}
+            onPin={noop}
+            onResume={noop}
+            session={makeSession({ id: 'same', profile, title: profile })}
+          />
+        ))}
+      </>
+    )
+
+    expect(screen.getByTitle('Todo progress').textContent).toBe('1/2')
+    expect(screen.queryByText('0/1')).toBeNull()
+  })
+
   it('keeps an aria-label on the kebab without wrapping it in a Tip', () => {
     render(
       <SidebarSessionRow

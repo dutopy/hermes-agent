@@ -62,7 +62,7 @@ export function setModelPreset(provider: string, model: string, patch: ModelPres
  *  a tile's picker must not clobber the primary composer's effort/fast. */
 export async function applyModelPreset(
   { effort, fast }: ModelPreset,
-  ctx: { failMessage: string; primary?: boolean; request: RequestGateway; sessionId: null | string }
+  ctx: { failMessage: string; primary?: boolean; profile?: string; request: RequestGateway; sessionId: null | string }
 ): Promise<void> {
   if (ctx.primary ?? true) {
     if (effort !== undefined) {
@@ -73,11 +73,15 @@ export async function applyModelPreset(
       setCurrentFastMode(fast)
     }
   } else if (ctx.sessionId) {
-    sessionTileDelegate()?.updateSession(ctx.sessionId, state => ({
-      ...state,
-      ...(effort !== undefined ? { reasoningEffort: effort } : {}),
-      ...(fast !== undefined ? { fast } : {})
-    }))
+    sessionTileDelegate()?.updateSession(
+      ctx.sessionId,
+      state => ({
+        ...state,
+        ...(effort !== undefined ? { reasoningEffort: effort } : {}),
+        ...(fast !== undefined ? { fast } : {})
+      }),
+      ctx.profile
+    )
   }
 
   if (!ctx.sessionId) {

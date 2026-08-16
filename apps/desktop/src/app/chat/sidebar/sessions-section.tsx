@@ -18,7 +18,8 @@ import {
 } from '@/lib/session-date-groups'
 import { sessionBucketLabel } from '@/lib/time'
 import { cn } from '@/lib/utils'
-import { sessionPinId } from '@/store/session'
+import { normalizeProfileKey } from '@/store/profile'
+import { sessionDurableStateKey, sessionDurableStateValue, sessionPinId } from '@/store/session'
 import { $sessionDotStateById, hasLiveTurn } from '@/store/session-dot-state'
 
 import { SidebarDateDivider, SidebarSectionMeta } from './chrome'
@@ -99,11 +100,11 @@ interface SidebarSessionsSectionProps {
   onToggle: () => void
   sessions: SessionInfo[]
   activeSessionId: null | string
-  onResumeSession: (sessionId: string) => void
-  onDeleteSession: (sessionId: string) => void
-  onArchiveSession: (sessionId: string) => void
+  onResumeSession: (sessionId: string, profile?: string) => void
+  onDeleteSession: (sessionId: string, profile?: string) => void
+  onArchiveSession: (sessionId: string, profile?: string) => void
   onBranchSession?: (sessionId: string, profile?: string) => void
-  onTogglePin: (sessionId: string) => void
+  onTogglePin: (sessionId: string, profile?: string) => void
   onNewSessionInWorkspace?: (path: null | string) => void
   pinned: boolean
   rootClassName?: string
@@ -247,25 +248,28 @@ export function SidebarSessionsSection({
 
   const renderRow = useCallback(
     (session: SessionInfo, draggable: boolean, branchStem?: string) => {
+      const ownerProfile = session.profile ? normalizeProfileKey(session.profile) : undefined
+
       const rowProps = {
         branchStem,
         card,
         isPinned: pinned,
         isSelected: session.id === activeSessionId,
-        onArchive: () => onArchiveSession(session.id),
-        onBranch: onBranchSession ? () => onBranchSession(session.id, session.profile) : undefined,
-        onDelete: () => onDeleteSession(session.id),
-        onPin: () => onTogglePin(sessionPinId(session)),
-        onResume: () => onResumeSession(session.id),
+        onArchive: () => onArchiveSession(session.id, ownerProfile),
+        onBranch: onBranchSession ? () => onBranchSession(session.id, ownerProfile) : undefined,
+        onDelete: () => onDeleteSession(session.id, ownerProfile),
+        onPin: () => onTogglePin(sessionPinId(session), ownerProfile),
+        onResume: () => onResumeSession(session.id, ownerProfile),
         reorderable: draggable && !branchStem,
         session,
-        showProfile: showProfileTags
+        showProfile: showProfileTags,
+        sortableId: pinned ? sessionDurableStateKey(session.profile, session.id) : session.id
       }
 
       return draggable && !branchStem ? (
-        <SortableSidebarSessionRow key={session.id} {...rowProps} />
+        <SortableSidebarSessionRow key={`${ownerProfile ?? 'legacy'}\u0000${session.id}`} {...rowProps} />
       ) : (
-        <SidebarSessionRow key={session.id} {...rowProps} />
+        <SidebarSessionRow key={`${ownerProfile ?? 'legacy'}\u0000${session.id}`} {...rowProps} />
       )
     },
     [
@@ -339,7 +343,10 @@ export function SidebarSessionsSection({
         : grouping === 'status'
           ? groupEntriesByStatus(
               displayEntries,
-              entry => hasLiveTurn(dotStates[entry.session.id] ?? 'idle'),
+              entry =>
+                hasLiveTurn(
+                  sessionDurableStateValue(dotStates, entry.session.profile, entry.session.id) ?? 'idle'
+                ),
               statusDividerLabels
             )
           : toSessionRows(displayEntries)
@@ -351,7 +358,13 @@ export function SidebarSessionsSection({
   // set is derived from the rows, not from `sessions`. Feeding it the unrendered
   // session order made a drop compute its target index against a list the user
   // wasn't looking at — the drag that landed a row in the wrong slot.
-  const sortableRowIds = useMemo(() => reorderableRowIds(flatRows), [flatRows])
+  const sortableRowIds = useMemo(
+    () =>
+      reorderableRowIds(flatRows, session =>
+        pinned ? sessionDurableStateKey(session.profile, session.id) : session.id
+      ),
+    [flatRows, pinned]
+  )
 
   // Pinned never virtualizes. Virtualization needs a bounded viewport to
   // measure against, and Pinned deliberately has none — however many chats you
@@ -520,10 +533,11 @@ interface SortableSessionRowProps {
   onDelete: () => void
   onPin: () => void
   onResume: () => void
+  sortableId: string
 }
 
 function SortableSidebarSessionRow(props: SortableSessionRowProps) {
-  return <SidebarSessionRow {...props} {...useSortableBindings(props.session.id)} />
+  return <SidebarSessionRow {...props} {...useSortableBindings(props.sortableId)} />
 }
 
 function SortableProjectOverviewRow(props: React.ComponentProps<typeof ProjectOverviewRow>) {

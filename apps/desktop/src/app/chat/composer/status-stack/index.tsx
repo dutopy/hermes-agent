@@ -13,7 +13,7 @@ import { Tip, TipKeybindLabel } from '@/components/ui/tooltip'
 import { type Translations, useI18n } from '@/i18n'
 import { useSessionSlice } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
-import { $billingBlock } from '@/store/billing-block'
+import { billingBlockForSession } from '@/store/billing-block'
 import {
   $statusItemsBySession,
   type ComposerStatusItem,
@@ -25,6 +25,7 @@ import {
 } from '@/store/composer-status'
 import { refreshSessionGoal } from '@/store/goals'
 import { $previewStatusBySession, dismissPreviewArtifact } from '@/store/preview-status'
+import { sessionRuntimeStateKey } from '@/store/session-states'
 import { $threadScrolledUp } from '@/store/thread-scroll'
 import { openSessionInNewWindow } from '@/store/windows'
 
@@ -73,6 +74,7 @@ interface ComposerStatusStackProps {
   /** The queue, built by the composer (it owns the queue's callbacks). Rendered
    *  as the last group so it stays fused to the composer like before. */
   queue: ReactNode
+  profile?: string
   sessionId: null | string
 }
 
@@ -81,7 +83,7 @@ interface ComposerStatusStackProps {
  * every session-scoped status — subagents, background tasks, queue — grouped by
  * type and separated by light dividers. Collapses to nothing when empty.
  */
-export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackProps) {
+export function ComposerStatusStack({ profile, queue, sessionId }: ComposerStatusStackProps) {
   const { t } = useI18n()
   const navigate = useNavigate()
   // Subscribe to THIS session's slice only. Both maps churn on other
@@ -90,10 +92,11 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
   // per open tile — on all of it. The per-key arrays are referentially stable
   // across unrelated writes, so the slice hook bails out unless OUR session's
   // items actually changed.
-  const items = useSessionSlice($statusItemsBySession, sessionId)
-  const previews = useSessionSlice($previewStatusBySession, sessionId)
+  const sessionKey = sessionId ? sessionRuntimeStateKey(profile, sessionId) : null
+  const items = useSessionSlice($statusItemsBySession, sessionKey)
+  const previews = useSessionSlice($previewStatusBySession, sessionKey)
   const scrolledUp = useStore($threadScrolledUp)
-  const billing = useStore($billingBlock)
+  const billing = useStore(useMemo(() => billingBlockForSession(sessionId, profile), [profile, sessionId]))
 
   const groups = useMemo(() => groupStatusItems(items), [items])
 
@@ -101,10 +104,10 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
   // process tool completions) live in use-message-stream.
   useEffect(() => {
     if (sessionId) {
-      void refreshBackgroundProcesses(sessionId)
-      void refreshSessionGoal(sessionId)
+      void refreshBackgroundProcesses(sessionId, profile)
+      void refreshSessionGoal(sessionId, profile)
     }
-  }, [sessionId])
+  }, [profile, sessionId])
 
   const hasRunningBackground = groups.some(g => g.type === 'background' && g.items.some(i => i.state === 'running'))
 
@@ -117,10 +120,10 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
       return
     }
 
-    const timer = setInterval(() => void refreshBackgroundProcesses(sessionId), BACKGROUND_POLL_MS)
+    const timer = setInterval(() => void refreshBackgroundProcesses(sessionId, profile), BACKGROUND_POLL_MS)
 
     return () => clearInterval(timer)
-  }, [hasRunningBackground, sessionId])
+  }, [hasRunningBackground, profile, sessionId])
 
   const openAgents = () => navigate(AGENTS_ROUTE)
 
@@ -133,7 +136,7 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
   const previewRows =
     visiblePreviews.length > 0 && sessionId
       ? visiblePreviews.map(item => (
-          <PreviewStatusRow item={item} key={item.id} onDismiss={id => dismissPreviewArtifact(sessionId, id)} />
+          <PreviewStatusRow item={item} key={item.id} onDismiss={id => dismissPreviewArtifact(sessionId, id, profile)} />
         ))
       : []
 
@@ -147,7 +150,7 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
   // thing above the composer when the account is out of credits. Rendered here
   // (not as a composer-disable) so slash commands stay usable.
   if (billing && sessionId && billing.sessionId === sessionId) {
-    sections.push({ key: 'billing', node: <BillingBanner sessionId={sessionId} /> })
+    sections.push({ key: 'billing', node: <BillingBanner profile={profile} sessionId={sessionId} /> })
   }
 
   for (const group of groups) {
@@ -178,9 +181,10 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
             <StatusItemRow
               item={item}
               key={item.id}
-              onDismiss={sessionId ? id => dismissBackgroundProcess(sessionId, id) : undefined}
+              onDismiss={sessionId ? id => dismissBackgroundProcess(sessionId, id, profile) : undefined}
               onOpen={() => openSubagent(item)}
-              onStop={sessionId ? id => void stopBackgroundProcess(sessionId, id) : undefined}
+              onStop={sessionId ? id => void stopBackgroundProcess(sessionId, id, profile) : undefined}
+              profile={profile}
             />
           ))}
         </StatusSection>

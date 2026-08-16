@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { $sessions } from '@/store/session'
 import type { SessionInfo } from '@/types/hermes'
 
+import { tileStoredRow } from './session-tile'
 import { listTileSessionRow } from './session-tile-actions'
 
 const STORED = 'stored-tab'
@@ -21,6 +22,7 @@ function row(overrides: Partial<SessionInfo> = {}): SessionInfo {
     output_tokens: 0,
     parent_session_id: null,
     preview: null,
+    profile: 'vision',
     source: 'desktop',
     started_at: 1,
     title: null,
@@ -34,6 +36,7 @@ function seed(preview: string, sessions: SessionInfo[] = $sessions.get()) {
     cwd: '/work/repo',
     model: 'claude-opus-5',
     preview,
+    profile: 'vision',
     runtimeId: RUNTIME,
     sessions,
     storedSessionId: STORED
@@ -78,5 +81,25 @@ describe('listTileSessionRow', () => {
     seed('  padded prompt  ')
 
     expect($sessions.get()[0]?.preview).toBe('padded prompt')
+  })
+
+  it('resolves a tile row by owner profile when the same stored id appears first in another profile', () => {
+    const profileA = row({ profile: 'a', title: 'A private title' })
+    const profileB = row({ profile: 'b', title: 'B tile title' })
+    $sessions.set([profileA, profileB])
+
+    expect(tileStoredRow('b', STORED)).toBe(profileB)
+  })
+
+  it('lists and deduplicates by explicit owner profile when stored ids collide', () => {
+    const foregroundCollision = row({ preview: 'foreground secret', profile: 'work' })
+    $sessions.set([foregroundCollision])
+
+    expect(seed('vision prompt', [foregroundCollision])).toBe(true)
+
+    expect($sessions.get()).toEqual([
+      expect.objectContaining({ id: STORED, preview: 'vision prompt', profile: 'vision' }),
+      foregroundCollision
+    ])
   })
 })

@@ -78,6 +78,7 @@ function leadingGlyph(item: ComposerStatusItem, s: Translations['statusStack']):
 
 interface StatusItemRowProps {
   item: ComposerStatusItem
+  profile?: string
   /** Clear a finished background task from the stack. */
   onDismiss?: (id: string) => void
   /** Open the subagent's own session window, livestreamed by the gateway's
@@ -92,7 +93,13 @@ interface StatusItemRowProps {
  * Memoised + keyed by id so parent re-renders never remount it (the spinner
  * keeps ticking instead of resetting).
  */
-export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOpen, onStop }: StatusItemRowProps) {
+export const StatusItemRow = memo(function StatusItemRow({
+  item,
+  onDismiss,
+  onOpen,
+  onStop,
+  profile
+}: StatusItemRowProps) {
   const { t } = useI18n()
   const s = t.statusStack
   const failed = item.state === 'failed'
@@ -109,7 +116,14 @@ export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOp
 
   // Background rows link to their read-only terminal tab; subagents open their session.
   const onActivate =
-    item.type === 'background' ? () => openAgentTerminal(item.id, item.title) : canOpen ? onOpen : undefined
+    item.type === 'background'
+      ? () =>
+          profile !== undefined
+            ? openAgentTerminal(profile, item.id, item.title)
+            : openAgentTerminal(item.id, item.title)
+      : canOpen
+        ? onOpen
+        : undefined
 
   return (
     <Fragment>

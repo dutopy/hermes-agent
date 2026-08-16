@@ -41,6 +41,21 @@ describe('clarify store', () => {
     expect($clarifyRequests.get()['session-b']?.requestId).toBe('req-b')
   })
 
+  it('isolates equal runtime ids by profile through lookup and targeted clear', () => {
+    const sharedRuntime = 'shared-runtime'
+
+    setClarifyRequest({ ...clarify(sharedRuntime, 'req-a'), profile: 'profile-a' })
+    setClarifyRequest({ ...clarify(sharedRuntime, 'req-b'), profile: 'profile-b' })
+
+    expect(hasClarifyRequest(sharedRuntime, 'profile-a')).toBe(true)
+    expect(hasClarifyRequest(sharedRuntime, 'profile-b')).toBe(true)
+
+    clearClarifyRequest('req-a', sharedRuntime, 'profile-a')
+
+    expect(hasClarifyRequest(sharedRuntime, 'profile-a')).toBe(false)
+    expect(hasClarifyRequest(sharedRuntime, 'profile-b')).toBe(true)
+  })
+
   it('exposes only the active session via the focus-scoped view', () => {
     setClarifyRequest(clarify('session-a', 'req-a'))
     setClarifyRequest(clarify('session-b', 'req-b'))

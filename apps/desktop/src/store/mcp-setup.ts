@@ -1,6 +1,8 @@
 import { atom, computed } from 'nanostores'
 
-import { $gateway } from './gateway'
+import { $gateway, requestGatewayForProfile } from './gateway'
+import { notifyError } from './notifications'
+import { sessionRuntimeStateKey } from './session-states'
 
 /**
  * Pending `mcp.setup.request`s — the desktop half of the `setup_mcp` tool's
@@ -16,6 +18,8 @@ export interface McpSetupRequest {
   action: 'authorize' | 'enable' | 'install'
   /** Agent-supplied one-liner: why this server helps right now. */
   reason: string
+  /** Gateway profile that owns both the runtime and the blocking response. */
+  profile?: string
   sessionId: string | null
 }
 
@@ -28,24 +32,25 @@ export interface McpSetupOutcome {
   tools?: string[]
 }
 
-const keyFor = (sessionId: string | null | undefined): string => sessionId ?? ''
+const keyFor = (sessionId: string | null | undefined, profile?: null | string): string =>
+  sessionRuntimeStateKey(profile, sessionId ?? '')
 
 export const $mcpSetupRequests = atom<Record<string, McpSetupRequest>>({})
 
 /** The setup request for one specific session — the transcript card reads
  *  this fixed-key view, same shape as `sessionClarifyRequest`. */
-export const sessionMcpSetupRequest = (sessionId: string | null) =>
-  computed($mcpSetupRequests, requests => requests[keyFor(sessionId)] ?? null)
+export const sessionMcpSetupRequest = (sessionId: string | null, profile?: null | string) =>
+  computed($mcpSetupRequests, requests => requests[keyFor(sessionId, profile)] ?? null)
 
 export function setMcpSetupRequest(request: McpSetupRequest): void {
-  $mcpSetupRequests.set({ ...$mcpSetupRequests.get(), [keyFor(request.sessionId)]: request })
+  $mcpSetupRequests.set({ ...$mcpSetupRequests.get(), [keyFor(request.sessionId, request.profile)]: request })
 }
 
-export function clearMcpSetupRequest(requestId?: string, sessionId?: string | null): void {
+export function clearMcpSetupRequest(requestId?: string, sessionId?: string | null, profile?: null | string): void {
   const requests = $mcpSetupRequests.get()
 
   if (sessionId !== undefined) {
-    const key = keyFor(sessionId)
+    const key = keyFor(sessionId, profile)
     const current = requests[key]
 
     if (!current || (requestId && current.requestId !== requestId)) {
@@ -77,8 +82,8 @@ export function clearMcpSetupRequest(requestId?: string, sessionId?: string | nu
 
 /** Whether `sessionId` has a setup card pending right now (imperative read —
  *  the composer checks this on Enter, not on every render). */
-export const hasMcpSetupRequest = (sessionId: string | null | undefined): boolean =>
-  Boolean($mcpSetupRequests.get()[keyFor(sessionId)])
+export const hasMcpSetupRequest = (sessionId: string | null | undefined, profile?: null | string): boolean =>
+  Boolean($mcpSetupRequests.get()[keyFor(sessionId, profile)])
 
 /**
  * Answer `sessionId`'s pending setup card as declined and drop it locally,
@@ -93,25 +98,40 @@ export const hasMcpSetupRequest = (sessionId: string | null | undefined): boolea
  * Mirrors skipClarifyRequest; mcp.setup.respond is allow_expired, so racing
  * the timeout is harmless.
  */
-export async function skipMcpSetupRequest(sessionId: string | null | undefined): Promise<boolean> {
-  const request = $mcpSetupRequests.get()[keyFor(sessionId)]
+export async function skipMcpSetupRequest(
+  sessionId: string | null | undefined,
+  profile?: null | string
+): Promise<boolean> {
+  const request = $mcpSetupRequests.get()[keyFor(sessionId, profile)]
 
   if (!request) {
     return false
   }
 
-  // Clear first: the answer is already decided, and an in-flight RPC must not
-  // leave a live card the user can answer a second time.
-  clearMcpSetupRequest(request.requestId, request.sessionId)
-
   try {
-    await $gateway.get()?.request('mcp.setup.respond', {
+    const params = {
       request_id: request.requestId,
       result: JSON.stringify({ server: request.server, status: 'declined' })
+    }
+
+    if (request.profile) {
+      await requestGatewayForProfile(request.profile, 'mcp.setup.respond', params)
+    } else {
+      await $gateway.get()?.request('mcp.setup.respond', params)
+    }
+
+    clearMcpSetupRequest(request.requestId, request.sessionId, request.profile)
+  } catch (error) {
+    // Keep the card parked so the response remains retryable. Raw transport/RPC
+    // detail is developer-only for profile-owned embedded surfaces.
+    console.error('Failed to skip MCP setup request', {
+      error,
+      profile: request.profile,
+      requestId: request.requestId,
+      sessionId: request.sessionId
     })
-  } catch {
-    // The tool times out on its own; a failed skip must never swallow the
-    // message the user is actually sending.
+    const fallback = 'Could not send MCP setup response'
+    notifyError(request.profile ? new Error(fallback) : error, fallback)
   }
 
   return true

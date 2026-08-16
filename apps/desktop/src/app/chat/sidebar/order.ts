@@ -1,3 +1,4 @@
+import type { SessionInfo } from '@/hermes'
 import type { SidebarListRow } from '@/lib/session-date-groups'
 
 /**
@@ -210,6 +211,9 @@ function clusterId(rows: SidebarListRow[]): string {
 }
 
 /** The reorderable ids of a rendered row list: root sessions, in render order. */
-export function reorderableRowIds(rows: SidebarListRow[]): string[] {
-  return rows.flatMap(row => (row.kind === 'session' && !row.entry.branchStem ? [row.entry.session.id] : []))
+export function reorderableRowIds(
+  rows: SidebarListRow[],
+  getId: (session: SessionInfo) => string = session => session.id
+): string[] {
+  return rows.flatMap(row => (row.kind === 'session' && !row.entry.branchStem ? [getId(row.entry.session)] : []))
 }

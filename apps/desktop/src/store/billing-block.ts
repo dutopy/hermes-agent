@@ -1,7 +1,9 @@
 import type { BillingBlock } from '@hermes/shared'
-import { atom } from 'nanostores'
+import { atom, computed } from 'nanostores'
 
 import { openExternalLink } from '@/lib/external-link'
+
+import { sessionRuntimeStateKey } from './session-states'
 
 /**
  * The active inference billing wall, if any. Set from the gateway
@@ -17,6 +19,17 @@ export interface ActiveBillingBlock {
 }
 
 export const $billingBlock = atom<ActiveBillingBlock | null>(null)
+export const $billingBlocksBySession = atom<Record<string, ActiveBillingBlock>>({})
+
+export function billingBlockForSession(sessionId: null | string, profile?: null | string) {
+  return computed([$billingBlocksBySession, $billingBlock], (blocks, legacy) => {
+    if (!sessionId) {
+      return null
+    }
+
+    return blocks[sessionRuntimeStateKey(profile, sessionId)] ?? (profile == null && legacy?.sessionId === sessionId ? legacy : null)
+  })
+}
 
 /**
  * Navigation intent counter. A toast fired outside React (or any surface
@@ -25,11 +38,27 @@ export const $billingBlock = atom<ActiveBillingBlock | null>(null)
  */
 export const $billingSettingsRequest = atom(0)
 
-export function setBillingBlock(sessionId: string, block: BillingBlock): void {
-  $billingBlock.set({ at: Date.now(), block, sessionId })
+export function setBillingBlock(sessionId: string, block: BillingBlock, profile?: null | string): void {
+  const value = { at: Date.now(), block, sessionId }
+  $billingBlocksBySession.set({ ...$billingBlocksBySession.get(), [sessionRuntimeStateKey(profile, sessionId)]: value })
+  if (profile == null) {
+    $billingBlock.set(value)
+  }
 }
 
-export function clearBillingBlock(sessionId?: string): void {
+export function clearBillingBlock(sessionId?: string, profile?: null | string): void {
+  if (sessionId) {
+    const key = sessionRuntimeStateKey(profile, sessionId)
+    const blocks = $billingBlocksBySession.get()
+    if (key in blocks) {
+      const next = { ...blocks }
+      delete next[key]
+      $billingBlocksBySession.set(next)
+    }
+  } else if (profile == null) {
+    $billingBlocksBySession.set({})
+  }
+
   const current = $billingBlock.get()
 
   if (!current) {
@@ -38,7 +67,7 @@ export function clearBillingBlock(sessionId?: string): void {
 
   // A scoped clear (new turn on session X) must not wipe a block raised by a
   // different session's provider.
-  if (sessionId && current.sessionId !== sessionId) {
+  if (profile != null || (sessionId && current.sessionId !== sessionId)) {
     return
   }
 

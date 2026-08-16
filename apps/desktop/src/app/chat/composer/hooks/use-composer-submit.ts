@@ -159,14 +159,14 @@ export function useComposerSubmit({
     // both RPCs ride the same socket in call order, so the gateway resolves the
     // clarify before it sees the follow-up. Awaiting first would leave the draft
     // live for a tick — long enough for a second Enter to send it twice.
-    if (payloadPresent && !queueEdit && hasClarifyRequest(sessionId)) {
-      void skipClarifyRequest(sessionId)
+    if (payloadPresent && !queueEdit && hasClarifyRequest(sessionId, scope.profile)) {
+      void skipClarifyRequest(sessionId, scope.profile)
     }
 
     // Same deal for a pending MCP setup card: the agent is blocked on
     // mcp.setup.respond, so a typed message declines the card and rides on.
-    if (payloadPresent && !queueEdit && hasMcpSetupRequest(sessionId)) {
-      void skipMcpSetupRequest(sessionId)
+    if (payloadPresent && !queueEdit && hasMcpSetupRequest(sessionId, scope.profile)) {
+      void skipMcpSetupRequest(sessionId, scope.profile)
     }
 
     // Approval / sudo / secret prompts also park the turn inside a tool batch,
@@ -176,7 +176,7 @@ export function useComposerSubmit({
     // it through resolves the prompt to empty and ends the turn as "Operation
     // interrupted." — the message looks eaten. Queue the words as the next turn
     // instead; the prompt stays answerable and the queue drains on settle.
-    const blockingPrompt = !queueEdit && hasBlockingPromptRequest(sessionId)
+    const blockingPrompt = !queueEdit && hasBlockingPromptRequest(sessionId, scope.profile)
 
     if (queueEdit) {
       exitQueuedEdit('save')

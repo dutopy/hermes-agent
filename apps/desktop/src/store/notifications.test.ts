@@ -1,6 +1,12 @@
 import { beforeEach, expect, test } from 'vitest'
 
-import { $notifications, clearNotifications, isDiskFullErrorMessage, notifyError } from './notifications'
+import {
+  $notifications,
+  clearNotifications,
+  isDiskFullErrorMessage,
+  notifyError,
+  notifyPromptResponseError
+} from './notifications'
 
 beforeEach(() => {
   clearNotifications()
@@ -54,4 +60,16 @@ test('session storage write failure is treated as disk-full class', () => {
   )
 
   expect(lastMessage()).toMatch(/Disk full/i)
+})
+
+test('prompt response errors redact only profile-owned requests and preserve legacy detail', () => {
+  const raw = new Error('/srv/private/prompt.db token=secret')
+
+  notifyPromptResponseError(raw, 'Could not respond', 'work')
+  expect(lastMessage()).toBe('Could not respond')
+  expect(JSON.stringify($notifications.get()[0])).not.toContain('/srv/private')
+
+  clearNotifications()
+  notifyPromptResponseError(raw, 'Could not respond')
+  expect(lastMessage()).toContain('/srv/private/prompt.db')
 })

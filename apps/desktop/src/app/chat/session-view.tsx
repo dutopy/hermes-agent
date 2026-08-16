@@ -1,8 +1,11 @@
+import type { ConnectionState } from '@hermes/shared'
 import { computed, type ReadableAtom } from 'nanostores'
 import { createContext, useContext } from 'react'
 
 import type { ClientSessionState } from '@/app/types'
 import type { ChatMessage } from '@/lib/chat-messages'
+import { createClientSessionState } from '@/lib/chat-runtime'
+import { $activeGatewayProfile } from '@/store/profile'
 import {
   $activeSessionId,
   $awaitingResponse,
@@ -12,10 +15,11 @@ import {
   $currentModel,
   $currentProvider,
   $currentReasoningEffort,
+  $gatewayState,
   $messages,
   $selectedStoredSessionId
 } from '@/store/session'
-import { $sessionStates } from '@/store/session-states'
+import { $sessionStates, sessionRuntimeState } from '@/store/session-states'
 
 import { lastVisibleMessageIsUser } from './thread-loading'
 
@@ -41,6 +45,8 @@ import { lastVisibleMessageIsUser } from './thread-loading'
  */
 export interface SessionView {
   kind: 'primary' | 'tile'
+  /** Explicit owner for embedded surfaces; absent preserves primary-chat legacy routing. */
+  profile?: string
   $runtimeId: ReadableAtom<string | null>
   $storedId: ReadableAtom<string | null>
   $messages: ReadableAtom<ChatMessage[]>
@@ -52,12 +58,32 @@ export interface SessionView {
   $model: ReadableAtom<string>
   $provider: ReadableAtom<string>
   $fast: ReadableAtom<boolean>
+  /** Connection readiness for this view's owning profile. Embedded surfaces
+   * must not inherit the foreground gateway's reconnect state. */
+  $gatewayState: ReadableAtom<ConnectionState>
   $reasoningEffort: ReadableAtom<string>
 }
 
-/** The active session's own slice, or `undefined` while it's a draft. */
-const $primaryState = computed([$activeSessionId, $sessionStates], (runtimeId, states) =>
-  runtimeId ? states[runtimeId] : undefined
+/** Resolve a primary runtime without weakening an explicit ownership claim.
+ * Omission is the only legacy path that may address a naked runtime key. */
+export function primarySessionState(
+  states: Record<string, ClientSessionState>,
+  runtimeId: null | string,
+  profile?: string
+): ClientSessionState | undefined {
+  if (!runtimeId) {
+    return undefined
+  }
+
+  return profile == null
+    ? sessionRuntimeState(states, undefined, runtimeId)
+    : (sessionRuntimeState(states, profile, runtimeId) ?? createClientSessionState())
+}
+
+/** The active session's explicitly profile-owned slice, or `undefined` while it's a draft. */
+const $primaryState = computed(
+  [$activeSessionId, $activeGatewayProfile, $sessionStates],
+  (runtimeId, profile, states) => primarySessionState(states, runtimeId, profile)
 )
 
 /**
@@ -78,10 +104,14 @@ const $primaryMessages = primaryField<ChatMessage[]>(state => state.messages, $m
 
 export const PRIMARY_SESSION_VIEW: SessionView = {
   kind: 'primary',
+  get profile() {
+    return $activeGatewayProfile.get()
+  },
   $awaitingResponse: primaryField<boolean>(state => state.awaitingResponse, $awaitingResponse),
   $busy: primaryField<boolean>(state => state.busy, $busy),
   $cwd: primaryField<string>(state => state.cwd, $currentCwd),
   $fast: primaryField<boolean>(state => state.fast, $currentFastMode),
+  $gatewayState,
   $lastVisibleIsUser: computed($primaryMessages, lastVisibleMessageIsUser),
   $messages: $primaryMessages,
   $messagesEmpty: computed($primaryMessages, messages => messages.length === 0),

@@ -8724,7 +8724,7 @@ function wireWindowReveal(win, { show, onRevealed }: { show?: () => void; onReve
 
 // Secondary "session windows" — one extra OS window per chat so a user can
 // work with multiple chats side by side. The registry guarantees one window
-// per sessionId (re-opening focuses the existing window) and self-cleans on
+// per profile-owned session (re-opening focuses the existing window) and self-cleans on
 // close. The primary mainWindow is never tracked here. Pure logic + the URL
 // builder live in session-windows.ts so they stay unit-testable.
 const sessionWindows = createSessionWindowRegistry()
@@ -8745,7 +8745,9 @@ function focusWindow(win) {
   win.focus()
 }
 
-function spawnSecondaryWindow({ sessionId, watch }: { sessionId?: string; watch?: boolean } = {}) {
+function spawnSecondaryWindow(
+  { profile, sessionId, watch }: { profile?: string; sessionId?: string; watch?: boolean } = {}
+) {
   const icon = getAppIconPath()
 
   const win = new BrowserWindow({
@@ -8805,6 +8807,7 @@ function spawnSecondaryWindow({ sessionId, watch }: { sessionId?: string; watch?
     win,
     buildSessionWindowUrl(sessionId, {
       devServer: DEV_SERVER,
+      profile,
       rendererIndexPath: DEV_SERVER ? undefined : resolveRendererIndex(),
       watch
     }),
@@ -8815,8 +8818,13 @@ function spawnSecondaryWindow({ sessionId, watch }: { sessionId?: string; watch?
 }
 
 // Open (or focus) a standalone window for a single chat session.
-function createSessionWindow(sessionId, { watch = false } = {}) {
-  return sessionWindows.openOrFocus(sessionId, () => spawnSecondaryWindow({ sessionId, watch }))
+function createSessionWindow(
+  sessionId,
+  { profile, watch = false }: { profile?: string; watch?: boolean } = {}
+) {
+  return profile === undefined
+    ? sessionWindows.openOrFocus(sessionId, () => spawnSecondaryWindow({ sessionId, watch }))
+    : sessionWindows.openOrFocus(sessionId, profile, () => spawnSecondaryWindow({ profile, sessionId, watch }))
 }
 
 // Additional full "instance" windows — peers of the primary that render the
@@ -9976,7 +9984,10 @@ ipcMain.handle('hermes:window:openSession', async (_event, sessionId, opts) => {
     return { ok: false, error: 'invalid-session-id' }
   }
 
-  createSessionWindow(sessionId.trim(), { watch: opts?.watch === true })
+  createSessionWindow(sessionId.trim(), {
+    profile: typeof opts?.profile === 'string' ? opts.profile : undefined,
+    watch: opts?.watch === true
+  })
 
   return { ok: true }
 })
@@ -10897,7 +10908,11 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
   // kind+session can arrive here twice. Collapse it at this single choke point.
   // Return true (not false): a notification for the event IS being shown by the
   // first caller, so the settings "send test" success probe stays honest.
-  if (isDuplicateNotification(`${payload?.kind ?? ''}:${payload?.sessionId ?? payload?.tag ?? ''}`)) {
+  if (
+    isDuplicateNotification(
+      `${payload?.kind ?? ''}:${payload?.profile ?? ''}:${payload?.sessionId ?? payload?.tag ?? ''}`
+    )
+  ) {
     return true
   }
 
@@ -10920,7 +10935,10 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
     focusWindow(mainWindow)
 
     if (payload?.sessionId) {
-      mainWindow.webContents.send('hermes:focus-session', payload.sessionId)
+      mainWindow.webContents.send('hermes:focus-session', {
+        profile: payload?.profile,
+        sessionId: payload?.sessionId
+      })
     }
   })
   notification.on('action', (_actionEvent, index) => {
@@ -10931,7 +10949,11 @@ ipcMain.handle('hermes:notify', (_event, payload) => {
     const action = actions[index]
 
     if (action?.id) {
-      mainWindow.webContents.send('hermes:notification-action', { sessionId: payload?.sessionId, actionId: action.id })
+      mainWindow.webContents.send('hermes:notification-action', {
+        actionId: action.id,
+        profile: payload?.profile,
+        sessionId: payload?.sessionId
+      })
     }
   })
   notification.show()

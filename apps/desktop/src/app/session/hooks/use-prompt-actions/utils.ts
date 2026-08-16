@@ -46,6 +46,13 @@ export function inlineErrorMessage(error: unknown, fallback: string): string {
   return (raw.match(/Error invoking remote method '[^']+': Error: (.+)$/)?.[1] ?? raw).replace(/^Error:\s*/, '').trim()
 }
 
+export const EMBEDDED_PROMPT_FAILURE_MESSAGE = 'Could not send message. Please try again.'
+
+/** Embedded surfaces never expose backend RPC detail. */
+export function visibleSubmitErrorMessage(error: unknown, fallback: string, redact: boolean): string {
+  return redact ? EMBEDDED_PROMPT_FAILURE_MESSAGE : inlineErrorMessage(error, fallback)
+}
+
 export function isSessionNotFoundError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error)
 
@@ -265,6 +272,33 @@ export async function withSessionBusyRetry<T>(call: () => Promise<T>): Promise<T
 // session whose first call hangs) let the SAME prompt launch several real turns
 // at once (the "message stacked 5×" bug). Keyed by stored/active session id.
 export const _submitInFlight = new Set<string>()
+
+/** Profile-owned surfaces may legitimately share a durable id. Keep the naked
+ * key only for the historical primary path whose owner is intentionally omitted. */
+export function submitInFlightKey(sessionIdentity: string, profile?: null | string): string {
+  return profile == null ? sessionIdentity : `${profile.trim() || 'default'}\u0000${sessionIdentity}`
+}
+
+/** Atomically claim a submit slot and return an idempotent release callback. */
+export function claimSubmitInFlight(sessionIdentity: string, profile?: null | string): (() => void) | null {
+  const key = submitInFlightKey(sessionIdentity, profile)
+
+  if (_submitInFlight.has(key)) {
+    return null
+  }
+
+  _submitInFlight.add(key)
+  let released = false
+
+  return () => {
+    if (released) {
+      return
+    }
+
+    released = true
+    _submitInFlight.delete(key)
+  }
+}
 
 export function base64FromDataUrl(dataUrl: string): string {
   const comma = dataUrl.indexOf(',')

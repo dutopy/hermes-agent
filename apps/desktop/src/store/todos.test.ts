@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { TodoItem } from '@/lib/todos'
+import { sessionRuntimeStateKey } from '@/store/session-states'
 
 import {
   $todosBySession,
@@ -84,6 +85,16 @@ describe('clearActiveSessionTodos (turn-end cleanup)', () => {
     clearActiveSessionTodos('s1')
 
     expect($todosBySession.get().s1).toBeUndefined()
+  })
+
+  it('clears only the owning profile when runtime ids collide', () => {
+    setSessionTodos('s1', [todo('a', 'in_progress')], 'profile-a')
+    setSessionTodos('s1', [todo('b', 'in_progress')], 'profile-b')
+
+    clearActiveSessionTodos('s1', 'profile-b')
+
+    expect($todosBySession.get()[sessionRuntimeStateKey('profile-a', 's1')]).toHaveLength(1)
+    expect($todosBySession.get()[sessionRuntimeStateKey('profile-b', 's1')]).toBeUndefined()
   })
 })
 

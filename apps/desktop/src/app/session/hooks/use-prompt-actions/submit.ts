@@ -38,14 +38,14 @@ import { resolveSessionProfile } from '../use-session-actions/utils'
 
 import { finalizeInterruptedMessages } from './rewind'
 import {
-  _submitInFlight,
+  claimSubmitInFlight,
   type GatewayRequest,
-  inlineErrorMessage,
   isProviderSetupError,
   isSessionBusyError,
   isTargetSessionBusy,
   SessionRecoveryAborted,
   type SubmitTextOptions,
+  visibleSubmitErrorMessage,
   withSessionBusyRetry,
   withSessionNotFoundResume
 } from './utils'
@@ -80,6 +80,8 @@ interface SubmitPromptDeps {
     setAwaitingResponse: (awaiting: boolean) => void
     setBusy: (busy: boolean) => void
     setMessages: (updater: (current: ChatMessage[]) => ChatMessage[]) => void
+    /** Explicit owner for embedded/session surfaces. Omitted is legacy primary. */
+    profile?: string
   }
 }
 
@@ -294,20 +296,13 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       // stalled turn can't stack the same prompt into multiple real turns. The
       // foreground ChatBar and background drainers can briefly overlap during a
       // session switch; this per-session lock makes that safe.
-      const submitLockKey = targetStoredSessionId || sessionId || startingActiveSessionId || '__pending_new__'
+      const releaseSubmitLock = claimSubmitInFlight(
+        targetStoredSessionId || sessionId || startingActiveSessionId || '__pending_new__',
+        scope.profile
+      )
 
-      if (_submitInFlight.has(submitLockKey)) {
+      if (!releaseSubmitLock) {
         return false
-      }
-
-      _submitInFlight.add(submitLockKey)
-      let submitLockReleased = false
-
-      const releaseSubmitLock = () => {
-        if (!submitLockReleased) {
-          submitLockReleased = true
-          _submitInFlight.delete(submitLockKey)
-        }
       }
 
       const optimisticId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -340,10 +335,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       const seedOptimistic = (sid: string) => {
         // Recents jump on send — not stream start, not turn resolve.
         const activity = bubbleText.trim() ? { preview: bubbleText.trim() } : undefined
-        touchSessionActivity(sid, activity)
+        touchSessionActivity(sid, activity, scope.profile)
 
         if (targetStoredSessionId && targetStoredSessionId !== sid) {
-          touchSessionActivity(targetStoredSessionId, activity)
+          touchSessionActivity(targetStoredSessionId, activity, scope.profile)
         }
 
         updateSessionState(
@@ -697,7 +692,11 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           return false
         }
 
-        const message = inlineErrorMessage(err, copy.promptFailed)
+        // The default scope is the legacy primary chat. Any injected scope is
+        // an embedded tile/SessionSurface and must not expose backend paths,
+        // tokens, or raw RPC detail in either of its user-visible channels.
+        const redactEmbeddedError = scope !== MAIN_SUBMIT_SCOPE
+        const message = visibleSubmitErrorMessage(err, copy.promptFailed, redactEmbeddedError)
 
         updateSessionState(
           sessionId,
@@ -728,7 +727,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         }
 
         if (targetIsCurrentView()) {
-          notifyError(err, copy.promptFailed)
+          notifyError(redactEmbeddedError ? new Error(message) : err, redactEmbeddedError ? message : copy.promptFailed)
         }
 
         return false

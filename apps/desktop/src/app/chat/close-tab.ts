@@ -27,15 +27,17 @@ import { closeSessionTile, nextSessionTileForWorkspace } from '@/store/session-s
  * `loadSessionIntoWorkspace` carries the app's route-based "load this session
  * into main"; omitting it disables the promotion half.
  */
-export function closeWorkspaceTab(loadSessionIntoWorkspace?: (storedSessionId: string) => void): boolean {
+export function closeWorkspaceTab(
+  loadSessionIntoWorkspace?: (storedSessionId: string, profile?: string) => void
+): boolean {
   // Order matters — close the tile FIRST so the selection homes to the
   // workspace instead of re-fronting the tile.
   if (loadSessionIntoWorkspace) {
     const next = nextSessionTileForWorkspace()
 
     if (next) {
-      closeSessionTile(next)
-      loadSessionIntoWorkspace(next)
+      closeSessionTile(next.storedSessionId, next.profile)
+      loadSessionIntoWorkspace(next.storedSessionId, next.profile)
 
       return true
     }
@@ -66,7 +68,9 @@ export function closeWorkspaceTab(loadSessionIntoWorkspace?: (storedSessionId: s
  * Steps 2-4 follow the same focused zone ⌘1…⌘9 indexes, so a second chat zone
  * with its own tab strip closes ITS tab instead of main's.
  */
-export function closeActiveTab(loadSessionIntoWorkspace?: (storedSessionId: string) => void): boolean {
+export function closeActiveTab(
+  loadSessionIntoWorkspace?: (storedSessionId: string, profile?: string) => void
+): boolean {
   if (isFocusWithin('[data-terminal]')) {
     closeActiveTerminal()
 

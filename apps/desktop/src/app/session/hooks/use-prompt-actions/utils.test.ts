@@ -4,8 +4,10 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ChatMessage } from '@/lib/chat-messages'
 
 import {
+  _submitInFlight,
   appendText,
   base64FromDataUrl,
+  claimSubmitInFlight,
   friendlyRemoteAttachError,
   type GatewayRequest,
   imageFilenameFromPath,
@@ -17,10 +19,30 @@ import {
   renderRpcResult,
   SessionRecoveryAborted,
   slashStatusText,
+  submitInFlightKey,
   visibleUserIndexAtOrdinal,
   visibleUserOrdinal,
   withSessionNotFoundResume
 } from './utils'
+
+describe('submitInFlightKey', () => {
+  it('allows concurrent profile-owned surfaces with the same durable id independently', () => {
+    _submitInFlight.clear()
+    const releaseA = claimSubmitInFlight('same-stored', 'profile-a')
+    const releaseB = claimSubmitInFlight('same-stored', 'profile-b')
+
+    expect(releaseA).toEqual(expect.any(Function))
+    expect(releaseB).toEqual(expect.any(Function))
+    expect(claimSubmitInFlight('same-stored', 'profile-a')).toBeNull()
+
+    releaseA?.()
+    releaseB?.()
+  })
+
+  it('preserves the naked durable id for the legacy primary path', () => {
+    expect(submitInFlightKey('same-stored')).toBe('same-stored')
+  })
+})
 
 describe('isSessionIdCandidate', () => {
   it('accepts the timestamped and hex id forms', () => {

@@ -22,7 +22,8 @@ vi.mock('@/store/windows', () => ({
 
 vi.mock('./routes', () => ({
   $workspaceIsPage: { get: () => workspaceIsPageGet() },
-  sessionRoute: (id: string) => `/c/${encodeURIComponent(id)}`
+  sessionRoute: (id: string, profile?: string) =>
+    `/c/${encodeURIComponent(id)}${profile === undefined ? '' : `?profile=${encodeURIComponent(profile.trim() || 'default')}`}`
 }))
 
 import { $activeSessionId, $selectedStoredSessionId } from '@/store/session'
@@ -96,7 +97,7 @@ describe('openSession', () => {
   it('in-place focuses an existing tile and does not navigate', () => {
     focusOpenSession.mockReturnValue('tile')
     openSession('s1', navigate)
-    expect(focusOpenSession).toHaveBeenCalledWith('s1')
+    expect(focusOpenSession).toHaveBeenCalledWith('s1', undefined)
     expect(navigate).not.toHaveBeenCalled()
     expect(openSessionTile).not.toHaveBeenCalled()
   })
@@ -120,18 +121,34 @@ describe('openSession', () => {
     expect(navigate).toHaveBeenCalledWith('/c/s1')
   })
 
+  it('in-place carries explicit profile ownership into the durable route', () => {
+    focusOpenSession.mockReturnValue(null)
+
+    openSession('same', navigate, 'in-place', 'profile-b')
+
+    expect(navigate).toHaveBeenCalledWith('/c/same?profile=profile-b')
+  })
+
   it('tab focuses an existing open session instead of stacking another', () => {
     focusOpenSession.mockReturnValue('tile')
     openSession('s1', navigate, 'tab')
-    expect(focusOpenSession).toHaveBeenCalledWith('s1')
+    expect(focusOpenSession).toHaveBeenCalledWith('s1', undefined)
     expect(openSessionTile).not.toHaveBeenCalled()
     expect(navigate).not.toHaveBeenCalled()
   })
 
+  it('passes explicit ownership to focus so a homonymous tile from another profile is not targeted', () => {
+    focusOpenSession.mockReturnValue(null)
+    openSession('same', navigate, 'tab', 'profile-b')
+
+    expect(focusOpenSession).toHaveBeenCalledWith('same', 'profile-b')
+    expect(openSessionTile).toHaveBeenCalledWith('same', 'center', undefined, undefined, 'profile-b')
+  })
+
   it('tab opens a stacked session tile when not on screen', () => {
     focusOpenSession.mockReturnValue(null)
-    openSession('s1', navigate, 'tab')
-    expect(openSessionTile).toHaveBeenCalledWith('s1', 'center')
+    openSession('s1', navigate, 'tab', 'vision')
+    expect(openSessionTile).toHaveBeenCalledWith('s1', 'center', undefined, undefined, 'vision')
     expect(navigate).not.toHaveBeenCalled()
   })
 
@@ -147,7 +164,7 @@ describe('openSession', () => {
     $selectedStoredSessionId.set('s0')
     focusOpenSession.mockReturnValue(null)
     openSession('s1', navigate, 'stack')
-    expect(openSessionTile).toHaveBeenCalledWith('s1', 'center')
+    expect(openSessionTile).toHaveBeenCalledWith('s1', 'center', undefined, undefined, undefined)
     expect(navigate).not.toHaveBeenCalled()
   })
 
@@ -156,7 +173,7 @@ describe('openSession', () => {
     focusOpenSession.mockReturnValue(null)
     reuseBlankDraftTile.mockReturnValue(true)
     openSession('s1', navigate, 'stack')
-    expect(reuseBlankDraftTile).toHaveBeenCalledWith('s1')
+    expect(reuseBlankDraftTile).toHaveBeenCalledWith('s1', undefined)
     expect(openSessionTile).not.toHaveBeenCalled()
     expect(navigate).not.toHaveBeenCalled()
   })
@@ -174,7 +191,7 @@ describe('openSession', () => {
     $activeSessionId.set('runtime-a')
     focusOpenSession.mockReturnValue(null)
     openSession('s1', navigate, 'stack')
-    expect(openSessionTile).toHaveBeenCalledWith('s1', 'center')
+    expect(openSessionTile).toHaveBeenCalledWith('s1', 'center', undefined, undefined, undefined)
   })
 
   it('stack loads into main when it holds only a blank draft', () => {
@@ -190,12 +207,19 @@ describe('openSession', () => {
     expect(openSessionTile).not.toHaveBeenCalled()
   })
 
+  it('window preserves explicit profile ownership across the native bridge', () => {
+    openSession('same', navigate, 'window', 'profile-b')
+
+    expect(openSessionInNewWindow).toHaveBeenCalledWith('same', { profile: 'profile-b' })
+    expect(openSessionTile).not.toHaveBeenCalled()
+  })
+
   it('window falls back to a tab when pop-out is unavailable', () => {
     canOpenSessionWindow.mockReturnValue(false)
     focusOpenSession.mockReturnValue(null)
     openSession('s1', navigate, 'window')
     expect(openSessionInNewWindow).not.toHaveBeenCalled()
-    expect(openSessionTile).toHaveBeenCalledWith('s1', 'center')
+    expect(openSessionTile).toHaveBeenCalledWith('s1', 'center', undefined, undefined, undefined)
   })
 
   it('no-ops on an empty id', () => {

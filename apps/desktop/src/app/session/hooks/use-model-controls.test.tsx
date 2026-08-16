@@ -219,6 +219,45 @@ describe('useModelControls', () => {
     })
   })
 
+  it('routes a profile-owned surface model selection only to its owner runtime and cache', async () => {
+    const queryClient = new QueryClient()
+    const ownerRequest = vi.fn(async () => ({ key: 'model', value: 'claude-sonnet-4.6' }) as never)
+    $activeGatewayProfile.set('profile-a')
+    $activeSessionId.set('shared-runtime')
+    setCurrentModel('foreground-model')
+    setCurrentProvider('foreground-provider')
+
+    const { result } = renderHook(() =>
+      useModelControls({
+        profile: 'profile-b',
+        queryClient,
+        requestGateway: ownerRequest
+      })
+    )
+
+    await expect(
+      result.current.selectModel({
+        model: 'claude-sonnet-4.6',
+        provider: 'anthropic',
+        sessionId: 'shared-runtime'
+      })
+    ).resolves.toBe(true)
+
+    expect(ownerRequest).toHaveBeenCalledTimes(1)
+    expect(ownerRequest).toHaveBeenCalledWith('config.set', {
+      session_id: 'shared-runtime',
+      key: 'model',
+      value: 'claude-sonnet-4.6 --provider anthropic --session'
+    })
+    expect($currentModel.get()).toBe('foreground-model')
+    expect($currentProvider.get()).toBe('foreground-provider')
+    expect(queryClient.getQueryData(modelOptionsQueryKey('profile-b', 'shared-runtime'))).toMatchObject({
+      model: 'claude-sonnet-4.6',
+      provider: 'anthropic'
+    })
+    expect(queryClient.getQueryData(modelOptionsQueryKey('profile-a', 'shared-runtime'))).toBeUndefined()
+  })
+
   it('routes active-session picker changes through config.set with an explicit session-scoped provider', async () => {
     $activeSessionId.set('session-1')
     const requestGateway = vi.fn(async () => ({ key: 'model', value: 'claude-sonnet-4.6' }) as never)

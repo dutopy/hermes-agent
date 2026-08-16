@@ -7,6 +7,7 @@ import type { ClientSessionState } from '@/app/types'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { modelOptionsQueryKey } from '@/lib/model-options'
 import { setCurrentModel, setCurrentProvider } from '@/store/session'
+import { sessionRuntimeStateKey } from '@/store/session-states'
 import type { RpcEvent } from '@/types/hermes'
 
 import { useMessageStream } from './index'
@@ -35,10 +36,11 @@ function Harness() {
     refreshHermesConfig,
     refreshSessions,
     sessionStateByRuntimeIdRef,
-    updateSessionState: (sessionId, updater) => {
-      const current = sessionStateByRuntimeIdRef.current.get(sessionId) ?? createClientSessionState()
+    updateSessionState: (sessionId, updater, _storedId, profile) => {
+      const key = sessionRuntimeStateKey(profile, sessionId)
+      const current = sessionStateByRuntimeIdRef.current.get(key) ?? createClientSessionState()
       const next = updater(current)
-      sessionStateByRuntimeIdRef.current.set(sessionId, next)
+      sessionStateByRuntimeIdRef.current.set(key, next)
 
       return next
     }
@@ -56,8 +58,8 @@ async function mountStream() {
   await waitFor(() => expect(handleEvent).not.toBeNull())
 }
 
-const sessionInfo = (sessionId: string, payload: Record<string, unknown>) =>
-  act(() => handleEvent!({ payload, session_id: sessionId, type: 'session.info' }))
+const sessionInfo = (sessionId: string, payload: Record<string, unknown>, profile?: string) =>
+  act(() => handleEvent!({ payload, profile, session_id: sessionId, type: 'session.info' }))
 
 beforeEach(() => {
   handleEvent = null
@@ -126,7 +128,7 @@ describe('session.info model-options invalidation gating', () => {
     expect(invalidate).not.toHaveBeenCalled()
   })
 
-  it('invalidates when the session model actually changes', async () => {
+  it('uses the foreground profile only for a legacy event without profile ownership', async () => {
     await mountStream()
     const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
 
@@ -136,6 +138,24 @@ describe('session.info model-options invalidation gating', () => {
     sessionInfo(ACTIVE_SID, { model: 'm2', provider: 'p1', running: true })
 
     expect(invalidate).toHaveBeenCalledWith({ queryKey: modelOptionsQueryKey(ACTIVE_PROFILE, ACTIVE_SID) })
+  })
+
+  it('invalidates only the event profile when foreground and owner share a runtime id', async () => {
+    await mountStream()
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
+    const ownerProfile = 'profile-b'
+
+    sessionInfo(ACTIVE_SID, { model: 'owner-m1', provider: 'owner-p1', running: true }, ownerProfile)
+    invalidate.mockClear()
+
+    sessionInfo(ACTIVE_SID, { model: 'owner-m2', provider: 'owner-p1', running: true }, ownerProfile)
+
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith({
+      queryKey: modelOptionsQueryKey(ownerProfile, ACTIVE_SID)
+    })
+    expect(invalidate).not.toHaveBeenCalledWith({
+      queryKey: modelOptionsQueryKey(ACTIVE_PROFILE, ACTIVE_SID)
+    })
   })
 })
 

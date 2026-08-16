@@ -1,16 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  addMcpServer,
+  authMcpServer,
+  cancelMcpOAuthFlow,
   checkHermesUpdate,
   getActionStatus,
   getElevenLabsVoices,
+  getMcpCatalog,
+  getMcpOAuthFlow,
   getMemoryProviderConfig,
   getStatus,
+  installMcpCatalogEntry,
+  removeMcpServer,
   restartGateway,
   saveMemoryProviderConfig,
   setApiRequestProfile,
+  setMcpServerEnabled,
   speakText,
   transcribeAudio,
+  transcribeAudioForProfile,
   updateHermes
 } from './hermes'
 
@@ -78,6 +87,35 @@ describe('backend action helpers are profile-scoped', () => {
 
     for (const call of api.mock.calls) {
       expect(call[0].profile).toBe('jarvis')
+    }
+  })
+
+  it('can transcribe for an embedded profile without mutating the foreground REST scope', () => {
+    setApiRequestProfile('foreground')
+
+    void transcribeAudioForProfile('surface', 'data:audio/webm;base64,AAAA', 'audio/webm')
+    void transcribeAudio('data:audio/webm;base64,BBBB', 'audio/webm')
+
+    expect(api.mock.calls[0]?.[0].profile).toBe('surface')
+    expect(api.mock.calls[1]?.[0].profile).toBe('foreground')
+  })
+
+  it('can run the complete MCP setup flow against its request owner profile', () => {
+    setApiRequestProfile('foreground')
+
+    void getMcpCatalog('surface')
+    void setMcpServerEnabled('server', true, 'surface')
+    void authMcpServer('server', 'surface')
+    void getMcpOAuthFlow('flow', 'surface')
+    void cancelMcpOAuthFlow('flow', 'surface')
+    void addMcpServer({ name: 'server', url: 'https://example.test' }, 'surface')
+    void removeMcpServer('server', 'surface')
+    void installMcpCatalogEntry('server', {}, 'surface')
+    void getActionStatus('install', 1, 'surface')
+
+    expect(api.mock.calls).toHaveLength(9)
+    for (const call of api.mock.calls) {
+      expect(call[0].profile).toBe('surface')
     }
   })
 })

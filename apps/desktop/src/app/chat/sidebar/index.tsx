@@ -116,10 +116,11 @@ import {
   $sessionProfilesTruncated,
   $sessions,
   $sessionsLoading,
-  sessionPinId,
+  sessionDurableStateValue,
   setCurrentCwd
 } from '@/store/session'
 import { $sessionDotStateById, sessionStatusBucket } from '@/store/session-dot-state'
+import { sessionPinKeyForOwner } from '@/store/session-pins'
 import { $focusedStoredSessionId, $workingSessionIds, type SplitDir } from '@/store/session-states'
 import { $archivedSessions, loadArchivedSessions } from '@/store/sidebar-archive'
 import { $sidebarSessionRankIds } from '@/store/sidebar-sort'
@@ -161,7 +162,13 @@ import {
 } from './projects'
 import { WorktreeDialog } from './projects/worktree-dialog'
 import { SidebarBlankState, SidebarPinnedEmptyState, SidebarSessionSkeletons } from './section-states'
-import { buildSessionByAnyId } from './session-index'
+import {
+  buildPinnedIdentitySet,
+  buildSessionByAnyId,
+  isPinnedSessionIdentity,
+  resolvePinnedSessions,
+  sidebarPinKey
+} from './session-index'
 import { SidebarSessionsSection, VIRTUALIZE_THRESHOLD } from './sessions-section'
 import { CONTEXT_SPLIT_KIT, SplitSubmenu } from './split-submenu'
 
@@ -276,10 +283,10 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
   onNavigate: (item: SidebarNavItem) => void
   onLoadMoreSessions: () => Promise<void> | void
   onLoadMoreMessaging?: (platform: string) => Promise<void> | void
-  onResumeSession: (sessionId: string) => void
-  onDeleteSession: (sessionId: string) => void
-  onArchiveSession: (sessionId: string) => void
-  onBranchSession: (sessionId: string) => void
+  onResumeSession: (sessionId: string, profile?: string) => void
+  onDeleteSession: (sessionId: string, profile?: string) => void
+  onArchiveSession: (sessionId: string, profile?: string) => void
+  onBranchSession: (sessionId: string, profile?: string) => void
   onNewSessionInWorkspace: (path: null | string) => void
   /** Create a brand-new session and open it as a tile on `dir`. */
   onNewSessionSplit: (dir: SplitDir) => void
@@ -458,7 +465,12 @@ export function ChatSidebar({
   // membership in the filtered set.
   const sessionMatchesFilters = useCallback(
     (session: SessionInfo) => {
-      if (statusFilter.length && !statusFilter.includes(sessionStatusBucket(dotStates[session.id]))) {
+      if (
+        statusFilter.length &&
+        !statusFilter.includes(
+          sessionStatusBucket(sessionDurableStateValue(dotStates, session.profile, session.id))
+        )
+      ) {
         return false
       }
 
@@ -510,50 +522,24 @@ export function ChatSidebar({
     [visibleSessions, cronSessions, messagingSessions]
   )
 
-  const pinnedSessions = useMemo(() => {
-    const seen = new Set<string>()
-    const out: SessionInfo[] = []
+  const pinnedSessions = useMemo(
+    () => resolvePinnedSessions(pinnedSessionIds, sessionByAnyId),
+    [pinnedSessionIds, sessionByAnyId]
+  )
 
-    for (const pinId of pinnedSessionIds) {
-      const session = sessionByAnyId.get(pinId)
-
-      if (session && !seen.has(session.id)) {
-        seen.add(session.id)
-        out.push(session)
-      }
-    }
-
-    return out
-  }, [pinnedSessionIds, sessionByAnyId])
-
-  // Every id a pin is reachable under: the raw stored ids, plus BOTH identities
-  // of each session we resolved one to. A pin is stored on the durable lineage
-  // root, but the lists that must filter it out are fed from three independent
-  // fetches (recents, the messaging slice, the backend project tree) and each
-  // can surface the same conversation under either its live tip or its root.
-  // Comparing one identity against the other is how a pinned session ended up
-  // rendered twice — once in Pinned, once in its project group.
-  const pinnedIdentitySet = useMemo(() => {
-    const ids = new Set(pinnedSessionIds)
-
-    for (const session of pinnedSessions) {
-      ids.add(session.id)
-
-      if (session._lineage_root_id) {
-        ids.add(session._lineage_root_id)
-      }
-    }
-
-    return ids
-  }, [pinnedSessionIds, pinnedSessions])
+  // Every qualified identity represented by the resolved pin rows. Pins are
+  // stored on durable lineage roots, while recents, messaging and project-tree
+  // fetches can surface the same conversation under either its live tip or root.
+  // Qualifying both identities keeps the pinned copy unique without hiding a
+  // homonymous row owned by another profile. Naked legacy pins are resolved to
+  // one deterministic row before this set is built.
+  const pinnedIdentitySet = useMemo(() => buildPinnedIdentitySet(pinnedSessions), [pinnedSessions])
 
   // A pinned session belongs to the Pinned section and nowhere else, so every
   // other list filters it out. Match on either identity the row carries — a
   // backend snapshot can surface either side of a compression tip rotation.
   const isPinnedSession = useCallback(
-    (session: SessionInfo) =>
-      pinnedIdentitySet.has(session.id) ||
-      (session._lineage_root_id != null && pinnedIdentitySet.has(session._lineage_root_id)),
+    (session: SessionInfo) => isPinnedSessionIdentity(session, pinnedIdentitySet),
     [pinnedIdentitySet]
   )
 
@@ -962,8 +948,16 @@ export function ChatSidebar({
   // backend now seeds each project folder as an (empty) repo, so the overlay
   // always has a lane to place a new in-project session into.
   const enteredProjectContent = useMemo(
-    () => (enteredProject ? overlayLiveLanes(enteredProject, agentSessions, removedSessionIds) : undefined),
-    [enteredProject, agentSessions, removedSessionIds]
+    () =>
+      enteredProject
+        ? overlayLiveLanes(
+            enteredProject,
+            agentSessions,
+            removedSessionIds,
+            showAllProfiles ? undefined : profileScope
+          )
+        : undefined,
+    [enteredProject, agentSessions, removedSessionIds, showAllProfiles, profileScope]
   )
 
   const scopedRepoPaths = useMemo(
@@ -1068,11 +1062,12 @@ export function ChatSidebar({
     () =>
       overlayLivePreviews(projectOverview ?? [], agentSessions, projects, PROJECT_PREVIEW_COUNT, {
         removed: removedSessionIds,
+        projectionProfile: showAllProfiles ? undefined : profileScope,
         // Rank before the trim, so "3 priciest in this project" isn't "3 most
         // recent, priciest first".
         rankIds: sortOrderIds
       }),
-    [projectOverview, agentSessions, projects, removedSessionIds, sortOrderIds]
+    [projectOverview, agentSessions, projects, removedSessionIds, showAllProfiles, profileScope, sortOrderIds]
   )
 
   const onEnterProject = useCallback(
@@ -1386,7 +1381,7 @@ export function ChatSidebar({
       ids.map(id => {
         const session = sessionByAnyId.get(id)
 
-        return session ? sessionPinId(session) : id
+        return session ? sessionPinKeyForOwner(session.id, session.profile, [session]) : id
       })
     )
 
@@ -1534,7 +1529,7 @@ export function ChatSidebar({
                 onDeleteSession={onDeleteSession}
                 onResumeSession={onResumeSession}
                 onToggle={() => undefined}
-                onTogglePin={pinSession}
+                onTogglePin={(sessionId, profile) => pinSession(sidebarPinKey(sessionId, profile))}
                 open
                 pinned={false}
                 rootClassName="min-h-32 flex-1 overflow-hidden p-0"
@@ -1556,7 +1551,7 @@ export function ChatSidebar({
                 onReorderSessions={reorderPinned}
                 onResumeSession={onResumeSession}
                 onToggle={() => setSidebarPinsOpen(!pinsOpen)}
-                onTogglePin={unpinSession}
+                onTogglePin={(sessionId, profile) => unpinSession(sidebarPinKey(sessionId, profile))}
                 open={pinsOpen}
                 pinned
                 rootClassName="shrink-0 p-0 pb-1"
@@ -1708,7 +1703,7 @@ export function ChatSidebar({
                 onReorderSessions={showAllProfiles ? undefined : reorderSessions}
                 onResumeSession={onResumeSession}
                 onToggle={() => setSidebarRecentsOpen(!agentsOpen)}
-                onTogglePin={pinSession}
+                onTogglePin={(sessionId, profile) => pinSession(sidebarPinKey(sessionId, profile))}
                 open={agentsOpen}
                 pinned={false}
                 projectBackRow={
@@ -1765,7 +1760,7 @@ export function ChatSidebar({
                     onDeleteSession={onDeleteSession}
                     onResumeSession={onResumeSession}
                     onToggle={() => toggleSidebarMessagingOpen(group.sourceId)}
-                    onTogglePin={pinSession}
+                    onTogglePin={(sessionId, profile) => pinSession(sidebarPinKey(sessionId, profile))}
                     open={messagingOpenIds.includes(group.sourceId)}
                     pinned={false}
                     rootClassName="shrink-0 p-0"

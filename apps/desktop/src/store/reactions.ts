@@ -1,5 +1,7 @@
+import type { ReadableAtom } from 'nanostores'
+
 import type { ChatMessage } from '@/lib/chat-messages'
-import { activeGateway } from '@/store/gateway'
+import { activeGateway, gatewayForProfile } from '@/store/gateway'
 import { notifyError } from '@/store/notifications'
 import { $activeSessionId, $messages, setMessages } from '@/store/session'
 import type { MessageReaction } from '@/types/hermes'
@@ -29,16 +31,32 @@ export function applyReaction(
   return [...without, { emoji, author, at: Date.now() / 1000 }]
 }
 
-function writeReactions(messageId: string, reactions: MessageReaction[], rowId?: number) {
+export interface MessageReactionScope {
+  messages: ReadableAtom<ChatMessage[]>
+  profile: string
+  runtimeSessionId: string
+  storedSessionId: string
+  writeMessages: (updater: (messages: ChatMessage[]) => ChatMessage[]) => void
+}
+
+function withReactions(messages: ChatMessage[], messageId: string, reactions: MessageReaction[], rowId?: number) {
+  return messages.map(message =>
+    message.id === messageId ? { ...message, reactions, ...(rowId === undefined ? {} : { rowId }) } : message
+  )
+}
+
+function writeReactions(messageId: string, reactions: MessageReaction[], rowId?: number, scope?: MessageReactionScope) {
   // A NEW ChatMessage object per change is load-bearing: the runtime
   // repository caches normalized ThreadMessages in a WeakMap keyed by
   // ChatMessage identity, so a mutation in place renders stale.
   // Keyed by the renderer id, not rowId: a live message has no rowId yet.
-  setMessages(messages =>
-    messages.map(message =>
-      message.id === messageId ? { ...message, reactions, ...(rowId === undefined ? {} : { rowId }) } : message
-    )
-  )
+  const update = (messages: ChatMessage[]) => withReactions(messages, messageId, reactions, rowId)
+
+  if (scope) {
+    scope.writeMessages(update)
+  } else {
+    setMessages(update)
+  }
 }
 
 /**
@@ -51,15 +69,16 @@ function writeReactions(messageId: string, reactions: MessageReaction[], rowId?:
 export async function toggleMessageReaction(
   message: ChatMessage,
   emoji: null | string,
-  author: MessageReaction['author'] = 'user'
+  author: MessageReaction['author'] = 'user',
+  scope?: MessageReactionScope
 ): Promise<void> {
   // A live message hasn't round-tripped through a resume yet, so it carries no
   // rowId. Rather than disable the affordance (which made reactions invisible
   // in any active conversation), let the backend resolve the newest row of
   // this role — which is exactly the message being reacted to.
   const rowId = message.rowId
-  const sessionId = $activeSessionId.get()
-  const gateway = activeGateway()
+  const sessionId = scope?.runtimeSessionId ?? $activeSessionId.get()
+  const gateway = scope ? gatewayForProfile(scope.profile) : activeGateway()
 
   if (!sessionId || !gateway) {
     notifyError(new Error(!sessionId ? 'No active session' : 'Gateway not connected'), 'Could not react')
@@ -67,9 +86,9 @@ export async function toggleMessageReaction(
     return
   }
 
-  const snapshot = $messages.get().find(m => m.id === message.id)?.reactions
+  const snapshot = (scope?.messages.get() ?? $messages.get()).find(m => m.id === message.id)?.reactions
 
-  writeReactions(message.id, applyReaction(snapshot, emoji, author))
+  writeReactions(message.id, applyReaction(snapshot, emoji, author), undefined, scope)
 
   try {
     const result = await gateway.request<MessageReactResponse>('message.react', {
@@ -80,11 +99,11 @@ export async function toggleMessageReaction(
     })
 
     // Learn the row id from the response so later toggles address it directly.
-    writeReactions(message.id, result?.reactions ?? [], result?.row_id)
+    writeReactions(message.id, result?.reactions ?? [], result?.row_id, scope)
   } catch (err) {
     // Be optimistic, THEN honest: a rejected write rolls back visibly and says
     // why, instead of the reaction quietly vanishing (desktop AGENTS.md).
-    writeReactions(message.id, snapshot ?? [])
+    writeReactions(message.id, snapshot ?? [], undefined, scope)
     notifyError(err, 'Could not react')
   }
 }

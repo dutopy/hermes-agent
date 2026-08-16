@@ -1,6 +1,7 @@
 import type { HermesGitWorktree } from '@/global'
 import type { ProjectInfo, SessionInfo } from '@/hermes'
 import { normalize } from '@/lib/text'
+import { sessionDurableSetHas } from '@/store/session'
 
 import { rankSessions } from '../order'
 
@@ -493,7 +494,8 @@ const NO_REMOVED: ReadonlySet<string> = new Set()
 export function overlayRepoLanes(
   repo: SidebarWorkspaceTree,
   live: SessionInfo[],
-  removed: ReadonlySet<string> = NO_REMOVED
+  removed: ReadonlySet<string> = NO_REMOVED,
+  projectionProfile?: null | string
 ): SidebarWorkspaceTree {
   const repoRootKey = pathKey(repo.path)
   let changed = false
@@ -508,7 +510,7 @@ export function overlayRepoLanes(
       return { ...g, sessions: [...g.sessions] }
     }
 
-    const kept = g.sessions.filter(s => !removed.has(s.id))
+    const kept = g.sessions.filter(s => !sessionDurableSetHas(removed, s, projectionProfile))
 
     changed ||= kept.length !== g.sessions.length
 
@@ -518,7 +520,7 @@ export function overlayRepoLanes(
   for (const session of live) {
     const cwd = (session.cwd || '').trim()
 
-    if (removed.has(session.id) || !cwd) {
+    if (sessionDurableSetHas(removed, session, projectionProfile) || !cwd) {
       continue
     }
 
@@ -594,11 +596,16 @@ export function overlayRepoLanes(
 function overlayHomeLane(
   project: SidebarProjectTree,
   live: SessionInfo[],
-  removed: ReadonlySet<string>
+  removed: ReadonlySet<string>,
+  projectionProfile?: null | string
 ): SidebarProjectTree {
   const lane = project.repos[0]?.groups[0]
-  const detached = live.filter(session => isDetachedSession(session) && !removed.has(session.id))
-  const kept = (lane?.sessions ?? []).filter(session => !removed.has(session.id))
+
+  const detached = live.filter(
+    session => isDetachedSession(session) && !sessionDurableSetHas(removed, session, projectionProfile)
+  )
+
+  const kept = (lane?.sessions ?? []).filter(session => !sessionDurableSetHas(removed, session, projectionProfile))
 
   if (!detached.length && kept.length === (lane?.sessions.length ?? 0)) {
     return project
@@ -677,16 +684,17 @@ export function excludeProjectSessions(
 export function overlayLiveLanes(
   project: SidebarProjectTree,
   live: SessionInfo[],
-  removed: ReadonlySet<string> = NO_REMOVED
+  removed: ReadonlySet<string> = NO_REMOVED,
+  projectionProfile?: null | string
 ): SidebarProjectTree {
   if (project.isNoProject) {
-    return overlayHomeLane(project, live, removed)
+    return overlayHomeLane(project, live, removed, projectionProfile)
   }
 
   let changed = false
 
   const repos = project.repos.map(repo => {
-    const next = overlayRepoLanes(repo, live, removed)
+    const next = overlayRepoLanes(repo, live, removed, projectionProfile)
 
     changed ||= next !== repo
 
@@ -702,6 +710,7 @@ export function overlayLiveLanes(
 
 interface PreviewOverlayOptions {
   removed?: ReadonlySet<string>
+  projectionProfile?: null | string
   /** The active sort key as an id order; recency when empty. */
   rankIds?: string[]
 }
@@ -712,12 +721,12 @@ export function overlayLivePreviews(
   live: SessionInfo[],
   explicitProjects: ProjectInfo[],
   limit: number,
-  { removed = NO_REMOVED, rankIds }: PreviewOverlayOptions = {}
+  { removed = NO_REMOVED, projectionProfile, rankIds }: PreviewOverlayOptions = {}
 ): Record<string, SessionInfo[]> {
   const byProject = new Map<string, SessionInfo[]>()
 
   for (const session of live) {
-    if (removed.has(session.id)) {
+    if (sessionDurableSetHas(removed, session, projectionProfile)) {
       continue
     }
 
@@ -737,7 +746,10 @@ export function overlayLivePreviews(
 
   for (const node of projects) {
     const liveRows = byProject.get(node.id) ?? []
-    const base = (node.previewSessions ?? []).filter(session => !removed.has(session.id))
+
+    const base = (node.previewSessions ?? []).filter(
+      session => !sessionDurableSetHas(removed, session, projectionProfile)
+    )
 
     if (!liveRows.length && !base.length) {
       continue

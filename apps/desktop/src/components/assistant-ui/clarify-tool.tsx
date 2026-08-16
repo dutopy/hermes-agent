@@ -33,8 +33,8 @@ import {
   sessionClarifyRequest,
   warnDroppedChoices
 } from '@/store/clarify'
-import { $gateway } from '@/store/gateway'
-import { notifyError } from '@/store/notifications'
+import { $gateway, requestGatewayForProfile } from '@/store/gateway'
+import { notifyError, notifyPromptResponseError } from '@/store/notifications'
 
 import { selectMessageRunning } from './tool/fallback-model'
 import { parseMaybeObject } from './tool/fallback-model/format'
@@ -305,8 +305,14 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
   const copy = t.assistant.clarify
   // The tool row is in whichever session's transcript rendered it — read THAT
   // session's clarify (primary or tile), not the globally-active one.
-  const sessionId = useStore(useSessionView().$runtimeId)
-  const $request = useMemo(() => sessionClarifyRequest(sessionId), [sessionId])
+  const view = useSessionView()
+  const sessionId = useStore(view.$runtimeId)
+  const profile = view.profile
+  const allowLegacyFallback = view.kind === 'primary'
+  const $request = useMemo(
+    () => sessionClarifyRequest(sessionId, profile, allowLegacyFallback),
+    [allowLegacyFallback, profile, sessionId]
+  )
   const request = useStore($request)
   const gateway = useStore($gateway)
   const fromArgs = useMemo(() => readClarifyArgs(args), [args])
@@ -360,7 +366,9 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
         return
       }
 
-      if (!gateway) {
+      const ownerProfile = matchingRequest.profile
+
+      if (!ownerProfile && !gateway) {
         notifyError(new Error(copy.gatewayDisconnected), copy.sendFailed)
 
         return
@@ -369,15 +377,21 @@ function ClarifyToolPending({ args }: ToolCallMessagePartProps) {
       setSubmitting(true)
 
       try {
-        await gateway.request<{ ok?: boolean }>('clarify.respond', {
+        const params = {
           request_id: matchingRequest.requestId,
           answer
-        })
+        }
+
+        if (ownerProfile) {
+          await requestGatewayForProfile<{ ok?: boolean }>(ownerProfile, 'clarify.respond', params)
+        } else {
+          await gateway!.request<{ ok?: boolean }>('clarify.respond', params)
+        }
         triggerHaptic('submit')
-        clearClarifyRequest(matchingRequest.requestId, matchingRequest.sessionId)
+        clearClarifyRequest(matchingRequest.requestId, matchingRequest.sessionId, matchingRequest.profile)
         // tool.complete lands next → ClarifyToolSettled.
       } catch (error) {
-        notifyError(error, copy.sendFailed)
+        notifyPromptResponseError(error, copy.sendFailed, ownerProfile)
         setSubmitting(false)
       }
     },

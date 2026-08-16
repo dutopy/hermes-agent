@@ -1,11 +1,14 @@
 import { atom, computed } from 'nanostores'
 
+import { sessionRuntimeStateKey } from './session-states'
+
 // The tool whose arguments the model is streaming right now, and when it
 // started. Generating a large payload (a 45 KB write_file) takes seconds during
 // which the tool has not begun and the transcript has nothing to say.
 // Per-session because a transcript may be a tile, and a tile must never narrate
 // the primary chat's work.
-const keyFor = (sessionId: string | null | undefined): string => sessionId ?? ''
+const keyFor = (sessionId: string | null | undefined, profile?: null | string): string =>
+  sessionRuntimeStateKey(profile, sessionId ?? '')
 
 export interface DraftingTool {
   name: string
@@ -15,12 +18,16 @@ export interface DraftingTool {
 export const $draftingToolSessions = atom<Record<string, DraftingTool>>({})
 
 /** What `sessionId` is drafting, if anything. */
-export function sessionDraftingTool(sessionId: null | string) {
-  return computed($draftingToolSessions, sessions => sessions[keyFor(sessionId)] ?? null)
+export function sessionDraftingTool(sessionId: null | string, profile?: null | string) {
+  return computed($draftingToolSessions, sessions => sessions[keyFor(sessionId, profile)] ?? null)
 }
 
-export function setSessionDraftingTool(sessionId: string | null | undefined, name: string): void {
-  const key = keyFor(sessionId)
+export function setSessionDraftingTool(
+  sessionId: string | null | undefined,
+  name: string,
+  profile?: null | string
+): void {
+  const key = keyFor(sessionId, profile)
   const sessions = $draftingToolSessions.get()
 
   if (!name) {

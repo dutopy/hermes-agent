@@ -260,8 +260,47 @@ export const sessionMatchesStoredId = (
 // O(sessions) scan there multiplies out to states × sessions × ~30Hz per busy
 // session, which is what made a populated recents list drag every stream. The
 // list is replaced wholesale (never mutated), so its reference is the cache key.
-type LineageRow = Pick<SessionInfo, '_lineage_root_id' | 'id'>
+type LineageRow = Pick<SessionInfo, '_lineage_root_id' | 'id' | 'profile'>
 const lineageIndexBySessions = new WeakMap<readonly LineageRow[], Map<string, string[]>>()
+
+/** Durable renderer-state key. Explicitly-owned state is qualified by profile;
+ * a null profile preserves the legacy foreground-only key during migration. */
+export function sessionDurableStateKey(profile: null | string | undefined, storedSessionId: string): string {
+  return profile == null ? storedSessionId : `${profile.trim() || 'default'}\u0000${storedSessionId}`
+}
+
+export function sessionDurableStateIdentity(key: string): { profile: null | string; storedSessionId: string } {
+  const separator = key.indexOf('\u0000')
+
+  return separator < 0
+    ? { profile: null, storedSessionId: key }
+    : { profile: key.slice(0, separator), storedSessionId: key.slice(separator + 1) }
+}
+
+/** Read explicitly-owned durable state. Bare foreground-only entries are a
+ * controlled legacy path and are visible only when ownership is omitted. */
+export function sessionDurableStateValue<T>(
+  values: Readonly<Record<string, T>>,
+  profile: null | string | undefined,
+  storedSessionId: string
+): T | undefined {
+  return values[sessionDurableStateKey(profile, storedSessionId)]
+}
+
+/** Match a durable-id set without exposing bare legacy entries to explicitly
+ * owned rows. `projectionProfile` is only for genuinely untagged legacy rows. */
+export function sessionDurableSetHas(
+  values: ReadonlySet<string>,
+  session: Pick<SessionInfo, '_lineage_root_id' | 'id' | 'profile'>,
+  projectionProfile?: null | string
+): boolean {
+  const owner = session.profile == null ? projectionProfile : session.profile
+
+  return (
+    values.has(sessionDurableStateKey(owner, session.id)) ||
+    Boolean(session._lineage_root_id && values.has(sessionDurableStateKey(owner, session._lineage_root_id)))
+  )
+}
 
 function lineageIndex(sessions: readonly LineageRow[]): Map<string, string[]> {
   const cached = lineageIndexBySessions.get(sessions)
@@ -285,10 +324,19 @@ function lineageIndex(sessions: readonly LineageRow[]): Map<string, string[]> {
   for (const session of sessions) {
     add(session.id, session.id)
 
+    const owner = (session.profile ?? '').trim() || 'default'
+    const scopedId = sessionDurableStateKey(owner, session.id)
+    add(scopedId, session.id)
+
     if (session._lineage_root_id) {
       add(session.id, session._lineage_root_id)
       add(session._lineage_root_id, session.id)
       add(session._lineage_root_id, session._lineage_root_id)
+
+      const scopedRoot = sessionDurableStateKey(owner, session._lineage_root_id)
+      add(scopedId, session._lineage_root_id)
+      add(scopedRoot, session.id)
+      add(scopedRoot, session._lineage_root_id)
     }
   }
 
@@ -305,10 +353,12 @@ function lineageIndex(sessions: readonly LineageRow[]): Map<string, string[]> {
  *  same lineage after a compression. Publishing every alias lets those surfaces
  *  keep using a plain membership test instead of each re-deriving lineage —
  *  and getting it wrong, which reads as a running session going idle mid-turn. */
-export function lineageAliases(storedId: string, sessions: readonly LineageRow[]): string[] {
+export function lineageAliases(storedId: string, sessions: readonly LineageRow[], profile?: null | string): string[] {
   // Every key is in its own bucket by construction, so the bucket IS the
   // alias set. Copied so no caller can mutate the shared index.
-  return lineageIndex(sessions).get(storedId)?.slice() ?? [storedId]
+  const aliases = lineageIndex(sessions).get(sessionDurableStateKey(profile, storedId))?.slice() ?? [storedId]
+
+  return aliases.includes(storedId) ? [storedId, ...aliases.filter(alias => alias !== storedId)] : aliases
 }
 
 /** True when two ids name the same conversation across compression tip rotation. */
@@ -443,7 +493,8 @@ export function mergeSessionPage(
 /** Raise a session in recents on user send (before stream / turn resolve). */
 export function touchSessionActivity(
   sessionId: string | null | undefined,
-  options?: { at?: number; preview?: string }
+  options?: { at?: number; preview?: string },
+  profile?: string
 ): void {
   const id = sessionId?.trim()
 
@@ -453,12 +504,16 @@ export function touchSessionActivity(
 
   const at = options?.at ?? Date.now() / 1000
   const preview = options?.preview?.trim().slice(0, 200) || undefined
+  const owner = profile === undefined ? undefined : profile.trim() || 'default'
 
   setSessions(prev => {
     let changed = false
 
     const next = prev.map(session => {
-      if (!sessionMatchesStoredId(session, id)) {
+      if (
+        !sessionMatchesStoredId(session, id) ||
+        (owner !== undefined && ((session.profile ?? '').trim() || 'default') !== owner)
+      ) {
         return session
       }
 

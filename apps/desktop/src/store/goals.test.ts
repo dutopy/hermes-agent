@@ -1,6 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { $goalsBySession, applyGoalStatusText, clearSessionGoal } from './goals'
+import { requestGatewayForProfile } from './gateway'
+import {
+  $goalsBySession,
+  applyGoalStatusText,
+  clearSessionGoal,
+  refreshSessionGoal,
+  setSessionGoal
+} from './goals'
+import { sessionRuntimeStateKey } from './session-states'
+
+vi.mock('./gateway', () => ({
+  $gateway: { get: vi.fn(() => null) },
+  requestGatewayForProfile: vi.fn()
+}))
 
 describe('goal store', () => {
   afterEach(() => {
@@ -69,5 +82,48 @@ describe('goal store', () => {
     expect($goalsBySession.get().s1).toMatchObject({ status: 'active', title: 'second' })
 
     clearSessionGoal('s1')
+  })
+
+  it('isolates writes, clears, and done timers for colliding runtime ids by profile', () => {
+    vi.useFakeTimers()
+    const aKey = sessionRuntimeStateKey('profile-a', 'shared')
+    const bKey = sessionRuntimeStateKey('profile-b', 'shared')
+
+    applyGoalStatusText('shared', '⊙ Goal set: goal A', 'profile-a')
+    applyGoalStatusText('shared', '✓ Goal done (1/1): goal B', 'profile-b')
+
+    expect($goalsBySession.get()[aKey]?.title).toBe('goal A')
+    expect($goalsBySession.get()[bKey]?.title).toBe('goal B')
+    clearSessionGoal('shared', 'profile-a')
+    vi.advanceTimersByTime(8_000)
+
+    expect($goalsBySession.get()[aKey]).toBeUndefined()
+    expect($goalsBySession.get()[bKey]).toBeUndefined()
+  })
+
+  it('does not let one profile cancel another profile done timer', () => {
+    vi.useFakeTimers()
+    const aKey = sessionRuntimeStateKey('profile-a', 'shared')
+    const bKey = sessionRuntimeStateKey('profile-b', 'shared')
+
+    setSessionGoal('shared', { status: 'done', title: 'done A', updatedAt: 1 }, 'profile-a')
+    setSessionGoal('shared', { status: 'active', title: 'active B', updatedAt: 2 }, 'profile-b')
+    vi.advanceTimersByTime(8_000)
+
+    expect($goalsBySession.get()[aKey]).toBeUndefined()
+    expect($goalsBySession.get()[bKey]?.title).toBe('active B')
+  })
+
+  it('hydrates through the owning profile requester and stores only its qualified goal', async () => {
+    vi.mocked(requestGatewayForProfile).mockResolvedValue({ output: '⊙ Goal set: owned goal' })
+
+    await refreshSessionGoal('shared', 'profile-b')
+
+    expect(requestGatewayForProfile).toHaveBeenCalledWith('profile-b', 'slash.exec', {
+      command: 'goal status',
+      session_id: 'shared'
+    })
+    expect($goalsBySession.get()[sessionRuntimeStateKey('profile-b', 'shared')]?.title).toBe('owned goal')
+    expect($goalsBySession.get().shared).toBeUndefined()
   })
 })

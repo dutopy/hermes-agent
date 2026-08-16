@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
 import { $previewStatusBySession } from '@/store/preview-status'
 import { $activeSessionId, $currentCwd } from '@/store/session'
+import { sessionRuntimeStateKey } from '@/store/session-states'
+import { recordToolDiff } from '@/store/tool-diffs'
 
 vi.mock('@assistant-ui/react', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -19,25 +21,30 @@ const PRIMARY_ID = 'primary-session'
 const TILE_ID = 'tile-session'
 
 /** Minimal tile view: only the fields the tool row reads. */
-function tileView(): SessionView {
+function tileView(profile?: string): SessionView {
   return {
     ...({} as SessionView),
     $cwd: atom('/tile/work'),
     $messages: atom([]),
     $runtimeId: atom<null | string>(TILE_ID),
-    kind: 'tile'
+    kind: 'tile',
+    profile
   }
 }
 
-function renderToolRow(wrap: (node: ReactNode) => ReactNode) {
+function renderToolRow(
+  wrap: (node: ReactNode) => ReactNode,
+  overrides: Partial<ComponentProps<typeof ToolFallback>> = {}
+) {
   const props = {
     args: { path: '/tile/work/report.html' },
     result: { path: '/tile/work/report.html' },
     toolCallId: 'call-1',
-    toolName: 'write_file'
+    toolName: 'write_file',
+    ...overrides
   } as unknown as ComponentProps<typeof ToolFallback>
 
-  render(<>{wrap(<ToolFallback {...props} />)}</>)
+  return render(<>{wrap(<ToolFallback {...props} />)}</>)
 }
 
 afterEach(() => {
@@ -45,6 +52,50 @@ afterEach(() => {
   $previewStatusBySession.set({})
   $activeSessionId.set(null)
   $currentCwd.set('')
+})
+
+describe('tool row inline diff ownership', () => {
+  it('reads only its SessionView profile and runtime when tool ids collide', () => {
+    const toolCallId = 'shared-rendered-tool'
+    const legacyDiff = '--- a/file\n+++ b/file\n-old\n+legacy leaked line'
+    const profileDiff = '--- a/file\n+++ b/file\n-old\n+profile B line'
+
+    recordToolDiff(toolCallId, legacyDiff)
+    recordToolDiff(toolCallId, '--- a/file\n+++ b/file\n-old\n+profile A line', {
+      profile: 'profile-a',
+      runtimeId: TILE_ID
+    })
+    recordToolDiff(toolCallId, profileDiff, { profile: 'profile-b', runtimeId: TILE_ID })
+
+    const view = tileView('profile-b')
+    const rendered = renderToolRow(node => <SessionViewProvider value={view}>{node}</SessionViewProvider>, {
+      args: { patch: profileDiff },
+      result: {},
+      toolCallId,
+      toolName: 'patch'
+    })
+
+    expect(rendered.container.textContent).toContain('profile B line')
+    expect(rendered.container.textContent).not.toContain('legacy leaked line')
+    expect(rendered.container.textContent).not.toContain('profile A line')
+  })
+
+  it('keeps an explicit naked-key fallback for the primary legacy view', () => {
+    const toolCallId = 'legacy-primary-tool'
+    const legacyDiff = '--- a/file\n+++ b/file\n-old\n+legacy primary line'
+
+    $activeSessionId.set(PRIMARY_ID)
+    recordToolDiff(toolCallId, legacyDiff)
+
+    const rendered = renderToolRow(node => node, {
+      args: { patch: legacyDiff },
+      result: {},
+      toolCallId,
+      toolName: 'patch'
+    })
+
+    expect(rendered.container.textContent).toContain('legacy primary line')
+  })
 })
 
 describe('tool row preview recording', () => {
@@ -71,6 +122,6 @@ describe('tool row preview recording', () => {
 
     renderToolRow(node => node)
 
-    expect(Object.keys($previewStatusBySession.get())).toEqual([PRIMARY_ID])
+    expect(Object.keys($previewStatusBySession.get())).toEqual([sessionRuntimeStateKey('default', PRIMARY_ID)])
   })
 })

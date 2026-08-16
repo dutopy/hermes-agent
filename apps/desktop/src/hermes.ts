@@ -1135,27 +1135,27 @@ export function saveMcpServers(servers: Record<string, Record<string, unknown>>)
 }
 
 /** Start an MCP OAuth flow and return the authorization URL. */
-export function authMcpServer(name: string): Promise<McpOAuthFlow> {
+export function authMcpServer(name: string, profile?: null | string): Promise<McpOAuthFlow> {
   return window.hermesDesktop.api<McpOAuthFlow>({
-    ...profileScoped(),
+    ...profileScoped(profile),
     path: `/api/mcp/servers/${encodeURIComponent(name)}/auth`,
     method: 'POST',
     timeoutMs: 60_000
   })
 }
 
-export function getMcpOAuthFlow(flowId: string): Promise<McpOAuthFlow> {
+export function getMcpOAuthFlow(flowId: string, profile?: null | string): Promise<McpOAuthFlow> {
   return window.hermesDesktop.api<McpOAuthFlow>({
-    ...profileScoped(),
+    ...profileScoped(profile),
     path: `/api/mcp/oauth/flows/${encodeURIComponent(flowId)}`
   })
 }
 
 /** Cancel an in-flight MCP OAuth flow server-side, freeing the per-server
  *  "already in progress" slot so a retry doesn't 409. */
-export function cancelMcpOAuthFlow(flowId: string): Promise<{ ok: boolean; status: string }> {
+export function cancelMcpOAuthFlow(flowId: string, profile?: null | string): Promise<{ ok: boolean; status: string }> {
   return window.hermesDesktop.api<{ ok: boolean; status: string }>({
-    ...profileScoped(),
+    ...profileScoped(profile),
     path: `/api/mcp/oauth/flows/${encodeURIComponent(flowId)}`,
     method: 'DELETE'
   })
@@ -1711,18 +1711,22 @@ export function checkHermesUpdate(force = false): Promise<BackendUpdateCheckResp
   })
 }
 
-export function getActionStatus(name: string, lines = 200): Promise<ActionStatusResponse> {
+export function getActionStatus(name: string, lines = 200, profile?: null | string): Promise<ActionStatusResponse> {
   return window.hermesDesktop.api<ActionStatusResponse>({
-    ...profileScoped(),
+    ...profileScoped(profile),
     path: `/api/actions/${encodeURIComponent(name)}/status?lines=${Math.max(1, lines)}`
   })
 }
 
-export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<AudioTranscriptionResponse> {
+function transcribeAudioScoped(
+  profile: null | string | undefined,
+  dataUrl: string,
+  mimeType?: string
+): Promise<AudioTranscriptionResponse> {
   return window.hermesDesktop.api<AudioTranscriptionResponse>({
     path: '/api/audio/transcribe',
     method: 'POST',
-    ...profileScoped(),
+    ...profileScoped(profile),
     body: {
       data_url: dataUrl,
       mime_type: mimeType
@@ -1732,6 +1736,19 @@ export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<Aud
     // default 15s Electron backend timeout.
     timeoutMs: audioTranscribeRequestTimeoutMs(dataUrl)
   })
+}
+
+export function transcribeAudio(dataUrl: string, mimeType?: string): Promise<AudioTranscriptionResponse> {
+  return transcribeAudioScoped(undefined, dataUrl, mimeType)
+}
+
+/** Profile-explicit STT for embedded surfaces; never mutates `_apiProfile`. */
+export function transcribeAudioForProfile(
+  profile: string,
+  dataUrl: string,
+  mimeType?: string
+): Promise<AudioTranscriptionResponse> {
+  return transcribeAudioScoped(profile, dataUrl, mimeType)
 }
 
 export function speakText(text: string): Promise<AudioSpeakResponse> {
@@ -1845,9 +1862,9 @@ export function addMcpServer(body: {
   args?: string[]
   env?: Record<string, string>
   auth?: string
-}): Promise<McpServerSummary> {
+}, profile?: null | string): Promise<McpServerSummary> {
   return window.hermesDesktop.api<McpServerSummary>({
-    ...profileScoped(),
+    ...profileScoped(profile),
     path: '/api/mcp/servers',
     method: 'POST',
     body
@@ -1856,36 +1873,37 @@ export function addMcpServer(body: {
 
 /** Remove one server from `mcp_servers` (the inline setup card's rollback
  *  when a directory install is cancelled after the config write). */
-export function removeMcpServer(name: string): Promise<{ ok: boolean }> {
+export function removeMcpServer(name: string, profile?: null | string): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
-    ...profileScoped(),
+    ...profileScoped(profile),
     path: `/api/mcp/servers/${encodeURIComponent(name)}`,
     method: 'DELETE'
   })
 }
 
-export function setMcpServerEnabled(name: string, enabled: boolean): Promise<{ ok: boolean }> {
+export function setMcpServerEnabled(name: string, enabled: boolean, profile?: null | string): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({
-    ...profileScoped(),
+    ...profileScoped(profile),
     path: `/api/mcp/servers/${encodeURIComponent(name)}/enabled`,
     method: 'PUT',
     body: { enabled }
   })
 }
 
-export function getMcpCatalog(): Promise<McpCatalogResponse> {
+export function getMcpCatalog(profile?: null | string): Promise<McpCatalogResponse> {
   return window.hermesDesktop.api<McpCatalogResponse>({
-    ...profileScoped(),
+    ...profileScoped(profile),
     path: '/api/mcp/catalog'
   })
 }
 
 export function installMcpCatalogEntry(
   name: string,
-  env: Record<string, string> = {}
+  env: Record<string, string> = {},
+  profile?: null | string
 ): Promise<{ ok: boolean; name?: string; pid?: number; action?: string; background?: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean; name?: string; pid?: number; action?: string; background?: boolean }>({
-    ...profileScoped(),
+    ...profileScoped(profile),
     path: '/api/mcp/catalog/install',
     method: 'POST',
     body: { name, env, enable: true },

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ClientSessionState } from '@/app/types'
 import { chatMessageText } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { $notifications, clearNotifications } from '@/store/notifications'
 import type { RpcEvent } from '@/types/hermes'
 
 import { useMessageStream } from './index'
@@ -27,11 +28,12 @@ function Harness() {
     refreshHermesConfig: vi.fn(async () => undefined),
     refreshSessions: vi.fn(async () => undefined),
     sessionStateByRuntimeIdRef,
-    updateSessionState: (sessionId, updater) => {
-      const current = sessionStateByRuntimeIdRef.current.get(sessionId) ?? createClientSessionState()
+    updateSessionState: (sessionId, updater, _storedSessionId, profile) => {
+      const key = profile ? `${profile}\u0000${sessionId}` : sessionId
+      const current = sessionStateByRuntimeIdRef.current.get(key) ?? createClientSessionState()
       const next = updater(current)
-      sessionStateByRuntimeIdRef.current.set(sessionId, next)
-      sessionStates.set(sessionId, next)
+      sessionStateByRuntimeIdRef.current.set(key, next)
+      sessionStates.set(key, next)
 
       return next
     }
@@ -56,6 +58,9 @@ const delta = (text: string) => act(() => handleEvent!({ payload: { text }, sess
 const completeWithError = (payload: Record<string, unknown>) =>
   act(() => handleEvent!({ payload: { status: 'error', ...payload }, session_id: SID, type: 'message.complete' }))
 
+const completeProfiledWithError = (profile: string, payload: Record<string, unknown>) =>
+  act(() => handleEvent!({ payload: { status: 'error', ...payload }, profile, session_id: SID, type: 'message.complete' }))
+
 function getState(): ClientSessionState {
   return sessionStates.get(SID) ?? createClientSessionState()
 }
@@ -67,6 +72,7 @@ function lastAssistant() {
 describe('terminal error message.complete frames', () => {
   beforeEach(() => {
     handleEvent = null
+    clearNotifications()
   })
 
   afterEach(() => {
@@ -115,5 +121,23 @@ describe('terminal error message.complete frames', () => {
 
     const bubble = lastAssistant()
     expect(bubble?.error).toBe('Error: something broke')
+  })
+
+  it('redacts profiled structured errors before transcript and keeps disk-full toast generic', async () => {
+    const profile = 'profile-b'
+    const secret = 'ENOSPC writing /home/alice/private/state.db token=super-secret'
+    await mountStream()
+
+    await completeProfiledWithError(profile, { error: secret, text: 'partial safe text' })
+
+    const state = sessionStates.get(`${profile}\u0000${SID}`)
+    const bubble = [...(state?.messages ?? [])].reverse().find(message => message.role === 'assistant' && !message.hidden)
+    const presented = JSON.stringify({ bubble, notifications: $notifications.get() })
+    expect(bubble?.error).toBe('Hermes reported an error')
+    expect(presented).not.toContain('/home/alice')
+    expect(presented).not.toContain('super-secret')
+    expect($notifications.get().some(notification => /disk full/i.test(`${notification.title} ${notification.message}`))).toBe(
+      true
+    )
   })
 })

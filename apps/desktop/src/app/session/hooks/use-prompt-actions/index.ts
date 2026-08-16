@@ -183,9 +183,8 @@ export async function uploadComposerAttachment(
 
     const result = await requestGateway<FileAttachResponse>('file.attach', {
       name: label,
-      path,
       session_id: liveSessionId,
-      ...(fileDataUrl ? { data_url: fileDataUrl } : {})
+      ...(fileDataUrl ? { data_url: fileDataUrl } : { path })
     })
 
     if (!result.attached || !result.ref_text) {

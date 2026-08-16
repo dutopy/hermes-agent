@@ -30,7 +30,7 @@ import { completeMcpDesktopOAuth, McpOAuthCancelled } from '@/lib/mcp-dashboard-
 import { directoryEntry } from '@/lib/mcp-directory'
 import { prettyName } from '@/lib/text'
 import { cn } from '@/lib/utils'
-import { $gateway } from '@/store/gateway'
+import { $gateway, requestGatewayForProfile } from '@/store/gateway'
 import { clearMcpSetupRequest, type McpSetupOutcome, sessionMcpSetupRequest } from '@/store/mcp-setup'
 import { notifyError } from '@/store/notifications'
 import { invalidateMcpSuggestionIndex } from '@/store/suggestion-providers/mcp'
@@ -168,10 +168,13 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
   const copy = t.assistant.mcpSetup
   // The tool row is in whichever session's transcript rendered it — read THAT
   // session's request (primary or tile), not the globally-active one.
-  const sessionId = useStore(useSessionView().$runtimeId)
-  const $request = useMemo(() => sessionMcpSetupRequest(sessionId), [sessionId])
+  const sessionView = useSessionView()
+  const sessionId = useStore(sessionView.$runtimeId)
+  const profile = sessionView.profile
+  const $request = useMemo(() => sessionMcpSetupRequest(sessionId, profile), [profile, sessionId])
   const request = useStore($request)
-  const gateway = useStore($gateway)
+  const activeGateway = useStore($gateway)
+  const ownerProfile = request?.profile
   const fromArgs = useMemo(() => readSetupArgs(args), [args])
 
   const server = fromArgs.server || request?.server || ''
@@ -196,11 +199,14 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
       // Another path (cancel racing completion) may have already resolved this
       // request; the store is the single source of truth, so bail if this
       // session's entry is gone — same guard as the approval bar.
-      if (!request || sessionMcpSetupRequest(request.sessionId).get()?.requestId !== request.requestId) {
+      if (
+        !request ||
+        sessionMcpSetupRequest(request.sessionId, request.profile).get()?.requestId !== request.requestId
+      ) {
         return
       }
 
-      if (!gateway) {
+      if (!request.profile && !activeGateway) {
         notifyError(new Error(copy.gatewayDisconnected), copy.sendFailed)
 
         return
@@ -208,7 +214,19 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
 
       // Clear first: the answer is decided, and an in-flight RPC must not
       // leave a live card that can be answered a second time.
-      clearMcpSetupRequest(request.requestId, request.sessionId)
+      clearMcpSetupRequest(request.requestId, request.sessionId, request.profile)
+
+      const requestOwner = <T,>(method: string, params: Record<string, unknown>): Promise<T> =>
+        request.profile
+          ? requestGatewayForProfile<T>(request.profile, method, params)
+          : activeGateway!.request<T>(method, params)
+
+      // Profiled outcomes become transcript/tool-result data. Never persist a
+      // backend path, token, or provider response in their detail field.
+      const safeOutcome =
+        request.profile && outcome.detail
+          ? { ...outcome, detail: copy.failed(outcome.server || request.server) }
+          : outcome
 
       // A successful outcome changed mcp_servers — reload the live session
       // BEFORE unblocking the tool, or the agent resumes being told the
@@ -218,9 +236,14 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
       // the config landed, tools arrive next session — report it and move on.
       if (outcome.status === 'installed' || outcome.status === 'enabled' || outcome.status === 'authorized') {
         try {
-          await gateway.request('reload.mcp', { confirm: true, session_id: request.sessionId ?? undefined })
+          await requestOwner('reload.mcp', { confirm: true, session_id: request.sessionId ?? undefined })
         } catch (error) {
-          notifyError(error, copy.reloadFailed)
+          console.error('[mcp-setup] Profile-owned reload failed', {
+            error,
+            profile: request.profile,
+            sessionId: request.sessionId
+          })
+          notifyError(request.profile ? new Error(copy.reloadFailed) : error, copy.reloadFailed)
         }
 
         // The just-set-up server must stop being suggested immediately.
@@ -228,16 +251,21 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
       }
 
       try {
-        await gateway.request<{ status?: string }>('mcp.setup.respond', {
+        await requestOwner<{ status?: string }>('mcp.setup.respond', {
           request_id: request.requestId,
-          result: JSON.stringify(outcome)
+          result: JSON.stringify(safeOutcome)
         })
         // tool.complete lands next → McpSetupSettled.
       } catch (error) {
-        notifyError(error, copy.sendFailed)
+        console.error('[mcp-setup] Profile-owned response failed', {
+          error,
+          profile: request.profile,
+          sessionId: request.sessionId
+        })
+        notifyError(request.profile ? new Error(copy.sendFailed) : error, copy.sendFailed)
       }
     },
-    [copy.gatewayDisconnected, copy.reloadFailed, copy.sendFailed, gateway, request]
+    [activeGateway, copy, request]
   )
 
   const decline = useCallback(() => {
@@ -264,7 +292,7 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
 
     try {
       if (action === 'enable') {
-        await setMcpServerEnabled(server, true)
+        await setMcpServerEnabled(server, true, ownerProfile)
         triggerHaptic('submit')
         await respond({ server, status: 'enabled' })
 
@@ -274,10 +302,10 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
       if (action === 'authorize') {
         const flow = await completeMcpDesktopOAuth({
           serverName: server,
-          start: authMcpServer,
-          status: getMcpOAuthFlow,
+          start: name => authMcpServer(name, ownerProfile),
+          status: flowId => getMcpOAuthFlow(flowId, ownerProfile),
           cancelled: () => cancelRef.current,
-          cancel: cancelMcpOAuthFlow,
+          cancel: flowId => cancelMcpOAuthFlow(flowId, ownerProfile),
           openExternal: url => window.hermesDesktop.openExternal(url)
         })
 
@@ -295,7 +323,7 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
       let resolved = entry
 
       if (resolved === undefined) {
-        const catalog = await getMcpCatalog()
+        const catalog = await getMcpCatalog(ownerProfile)
         resolved = catalog.entries.find(candidate => candidate.name === server) ?? null
         setEntry(resolved)
       }
@@ -314,21 +342,21 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
         // flow dies after the config write (cancel, closed OAuth tab), roll
         // the write back — decline means "no server", not an unauthorized
         // entry squatting in mcp_servers (authoritative-write rule).
-        await addMcpServer({ name: known.name, url: known.url })
+        await addMcpServer({ name: known.name, url: known.url }, ownerProfile)
 
         let flow
 
         try {
           flow = await completeMcpDesktopOAuth({
             serverName: known.name,
-            start: authMcpServer,
-            status: getMcpOAuthFlow,
+            start: name => authMcpServer(name, ownerProfile),
+            status: flowId => getMcpOAuthFlow(flowId, ownerProfile),
             cancelled: () => cancelRef.current,
-            cancel: cancelMcpOAuthFlow,
+            cancel: flowId => cancelMcpOAuthFlow(flowId, ownerProfile),
             openExternal: url => window.hermesDesktop.openExternal(url)
           })
         } catch (error) {
-          await removeMcpServer(known.name).catch(() => {
+          await removeMcpServer(known.name, ownerProfile).catch(() => {
             // Rollback is best-effort; the primary error/cancel wins.
           })
           throw error
@@ -349,13 +377,13 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
         return
       }
 
-      const res = await installMcpCatalogEntry(server, envDraft)
+      const res = await installMcpCatalogEntry(server, envDraft, ownerProfile)
 
       // Git-backed entries clone in the background — poll to completion so a
       // non-zero exit surfaces as a real failure instead of a false success.
       if (res.background && res.action) {
         for (;;) {
-          const status = throwIfCancelled(await getActionStatus(res.action, 1))
+          const status = throwIfCancelled(await getActionStatus(res.action, 1, ownerProfile))
 
           if (!status.running) {
             if (status.exit_code !== 0) {
@@ -378,7 +406,14 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
         return
       }
 
-      notifyError(error, copy.failed(server))
+      if (ownerProfile) {
+        console.error('[mcp-setup] Profile-owned setup failed', {
+          error,
+          profile: ownerProfile,
+          sessionId: request?.sessionId
+        })
+      }
+      notifyError(ownerProfile ? new Error(copy.failed(server)) : error, copy.failed(server))
       await respond({
         detail: error instanceof Error ? error.message : String(error),
         server,
@@ -387,7 +422,7 @@ function McpSetupPending({ args }: ToolCallMessagePartProps) {
     } finally {
       setWorking(false)
     }
-  }, [action, copy, entry, envDraft, respond, server])
+  }, [action, copy, entry, envDraft, ownerProfile, respond, server])
 
   const title =
     action === 'enable'

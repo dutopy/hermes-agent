@@ -1,5 +1,6 @@
 import { createContext, memo, useCallback, useContext, useMemo, useRef, useState } from 'react'
 
+import { useSessionView } from '@/app/chat/session-view'
 import { AssistantMessage } from '@/components/assistant-ui/thread/assistant-message'
 import { ThreadMessageList } from '@/components/assistant-ui/thread/list'
 import { BackgroundResumeNotice, CenteredThreadSpinner } from '@/components/assistant-ui/thread/status'
@@ -12,7 +13,7 @@ import { Intro, type IntroProps } from '@/components/chat/intro'
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 import type { HermesGateway } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { notifyError } from '@/store/notifications'
+import { notifyError, profiledPresentationError } from '@/store/notifications'
 
 type ThreadLoadingState = 'response' | 'session'
 
@@ -68,6 +69,8 @@ export const Thread = memo(function Thread({
 }: ThreadProps) {
   const { t } = useI18n()
   const copy = t.assistant.thread
+  const view = useSessionView()
+  const restoreOwnerProfile = view.kind === 'tile' ? view.profile : undefined
 
   const [restoreConfirmTarget, setRestoreConfirmTarget] = useState<
     (RestoreMessageTarget & { messageId: string }) | null
@@ -84,9 +87,9 @@ export const Thread = memo(function Thread({
 
     closeRestoreConfirm()
     void Promise.resolve(onRestoreToMessage(messageId, { text, userOrdinal })).catch((error: unknown) => {
-      notifyError(error, 'Restore failed')
+      notifyError(profiledPresentationError(error, 'Restore failed', restoreOwnerProfile), 'Restore failed')
     })
-  }, [closeRestoreConfirm, onRestoreToMessage, restoreConfirmTarget])
+  }, [closeRestoreConfirm, onRestoreToMessage, restoreConfirmTarget, restoreOwnerProfile])
 
   const requestRestoreConfirm = useCallback((messageId: string, target: RestoreMessageTarget) => {
     setRestoreConfirmTarget({ messageId, ...target })

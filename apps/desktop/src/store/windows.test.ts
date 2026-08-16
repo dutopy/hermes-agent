@@ -89,6 +89,16 @@ describe('openSessionInNewWindow', () => {
     expect(notifyError).not.toHaveBeenCalled()
   })
 
+  it('forwards explicit profile ownership to the native bridge', async () => {
+    const open = vi.fn().mockResolvedValue({ ok: true })
+    installBridge(open)
+
+    await openSessionInNewWindow('same', { profile: 'profile-b' })
+
+    expect(open).toHaveBeenCalledWith('same', { profile: 'profile-b' })
+    expect(notifyError).not.toHaveBeenCalled()
+  })
+
   it('notifies on an ok:false result', async () => {
     installBridge(vi.fn().mockResolvedValue({ ok: false, error: 'invalid-session-id' }))
 

@@ -2426,6 +2426,7 @@ describe('usePromptActions file attachment sync', () => {
     cleanup()
     $connection.set(null)
     $currentCwd.set('')
+    $terminalBackend.set('')
     vi.restoreAllMocks()
   })
 
@@ -2478,7 +2479,6 @@ describe('usePromptActions file attachment sync', () => {
     expect(calls.map(c => c.method)).toEqual(['file.attach', 'prompt.submit'])
     expect(calls[0]?.params).toMatchObject({
       session_id: RUNTIME_SESSION_ID,
-      path: '/Users/alice/Downloads/report.txt',
       name: 'report.txt',
       data_url: 'data:text/plain;base64,aGVsbG8='
     })
@@ -2532,7 +2532,6 @@ describe('usePromptActions file attachment sync', () => {
       params: {
         data_url: 'data:text/plain;base64,aGVsbG8=',
         name: 'report.txt',
-        path: 'C:\\Users\\alice\\Downloads\\report.txt',
         session_id: RUNTIME_SESSION_ID
       }
     })
@@ -2623,7 +2622,6 @@ describe('usePromptActions file attachment sync', () => {
       params: {
         data_url: 'data:text/plain;base64,aGVsbG8=',
         name: 'report.txt',
-        path: '/Users/alice/Downloads/report.txt',
         session_id: RUNTIME_SESSION_ID
       }
     })

@@ -10,6 +10,10 @@ import {
   clearApprovalRequest,
   clearSecretRequest,
   clearSudoRequest,
+  sessionApprovalRequest,
+  sessionAwaitingInput,
+  sessionSecretRequest,
+  sessionSudoRequest,
   setApprovalRequest,
   setSecretRequest,
   setSudoRequest
@@ -131,6 +135,39 @@ describe('clearAllPrompts', () => {
 
     $activeSessionId.set('s2')
     expect($approvalRequest.get()?.command).toBe('y')
+  })
+})
+
+describe('profile-qualified prompt collisions', () => {
+  it('isolates every prompt kind, awaitingInput, and targeted clear for equal runtime ids', () => {
+    const runtimeId = 'shared-runtime'
+
+    setApprovalRequest({ command: 'profile-a command', description: 'a', profile: 'profile-a', sessionId: runtimeId })
+    setApprovalRequest({ command: 'profile-b command', description: 'b', profile: 'profile-b', sessionId: runtimeId })
+    setSudoRequest({ profile: 'profile-a', requestId: 'sudo-a', sessionId: runtimeId })
+    setSudoRequest({ profile: 'profile-b', requestId: 'sudo-b', sessionId: runtimeId })
+    setSecretRequest({ envVar: 'A_KEY', profile: 'profile-a', prompt: 'a', requestId: 'secret-a', sessionId: runtimeId })
+    setSecretRequest({ envVar: 'B_KEY', profile: 'profile-b', prompt: 'b', requestId: 'secret-b', sessionId: runtimeId })
+
+    expect(sessionApprovalRequest(runtimeId, 'profile-a').get()?.command).toBe('profile-a command')
+    expect(sessionApprovalRequest(runtimeId, 'profile-b').get()?.command).toBe('profile-b command')
+    expect(sessionSudoRequest(runtimeId, 'profile-a').get()?.requestId).toBe('sudo-a')
+    expect(sessionSudoRequest(runtimeId, 'profile-b').get()?.requestId).toBe('sudo-b')
+    expect(sessionSecretRequest(runtimeId, 'profile-a').get()?.envVar).toBe('A_KEY')
+    expect(sessionSecretRequest(runtimeId, 'profile-b').get()?.envVar).toBe('B_KEY')
+    expect(sessionAwaitingInput(runtimeId, 'profile-a').get()).toBe(true)
+    expect(sessionAwaitingInput(runtimeId, 'profile-b').get()).toBe(true)
+
+    clearAllPrompts(runtimeId, 'profile-a')
+
+    expect(sessionApprovalRequest(runtimeId, 'profile-a').get()).toBeNull()
+    expect(sessionSudoRequest(runtimeId, 'profile-a').get()).toBeNull()
+    expect(sessionSecretRequest(runtimeId, 'profile-a').get()).toBeNull()
+    expect(sessionAwaitingInput(runtimeId, 'profile-a').get()).toBe(false)
+    expect(sessionApprovalRequest(runtimeId, 'profile-b').get()?.command).toBe('profile-b command')
+    expect(sessionSudoRequest(runtimeId, 'profile-b').get()?.requestId).toBe('sudo-b')
+    expect(sessionSecretRequest(runtimeId, 'profile-b').get()?.envVar).toBe('B_KEY')
+    expect(sessionAwaitingInput(runtimeId, 'profile-b').get()).toBe(true)
   })
 })
 

@@ -1,6 +1,8 @@
 import { computed } from 'nanostores'
 
+import { $activeGatewayProfile } from './profile'
 import { $activeSessionId, $busy } from './session'
+import { sessionRuntimeStateKey } from './session-states'
 import { $subagentsBySession, type SubagentProgress } from './subagents'
 
 export interface BackgroundResume {
@@ -29,13 +31,13 @@ const RUNNING = (s: SubagentProgress) => s.status === 'running' || s.status === 
  * that turn, not parked background work the user is waiting on.
  */
 export const $backgroundResume = computed(
-  [$subagentsBySession, $activeSessionId, $busy],
-  (bySession, sid, busy): BackgroundResume | null => {
+  [$subagentsBySession, $activeSessionId, $activeGatewayProfile, $busy],
+  (bySession, sid, profile, busy): BackgroundResume | null => {
     if (busy || !sid) {
       return null
     }
 
-    const running = (bySession[sid] ?? []).filter(RUNNING)
+    const running = (bySession[sessionRuntimeStateKey(profile, sid)] ?? []).filter(RUNNING)
 
     if (running.length === 0) {
       return null

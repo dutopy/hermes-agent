@@ -27,6 +27,7 @@ import { $sidebarRowMeta } from '@/store/layout'
 import { normalizeProfileKey } from '@/store/profile'
 import { $projects } from '@/store/projects'
 import { $pullRequestsByBranch, sessionPrKey } from '@/store/pull-requests'
+import { sessionDurableStateValue } from '@/store/session'
 import { $sessionDotStateById, hasLiveTurn, showsRunningArc } from '@/store/session-dot-state'
 import { sessionCostUsd } from '@/store/sidebar-archive'
 import { $todoProgressBySession } from '@/store/todos'
@@ -217,7 +218,10 @@ function SidebarSessionRowImpl({
   // The same resolved state the row's dot paints, so the arc and the dot cannot
   // contradict each other. A selector, not a plain useStore: the map is rebuilt
   // whenever any session's status changes, but a row only repaints on its own.
-  const dotState = useStoreSelector($sessionDotStateById, states => states[session.id] ?? 'idle')
+  const dotState = useStoreSelector(
+    $sessionDotStateById,
+    states => sessionDurableStateValue(states, session.profile, session.id) ?? 'idle'
+  )
   const liveTurn = hasLiveTurn(dotState)
 
   // Card header line: the workspace this belongs to — the project when it
@@ -241,7 +245,9 @@ function SidebarSessionRowImpl({
   const size = card && session.message_count > 0 ? r.messageCount(session.message_count) : ''
   // Live plan progress ("3/7"), far right of the footer. A selector keyed to
   // this row: only rows whose own fraction changes repaint on todo events.
-  const todoProgress = useStoreSelector($todoProgressBySession, progress => (card ? progress[session.id] : undefined))
+  const todoProgress = useStoreSelector($todoProgressBySession, progress =>
+    card ? sessionDurableStateValue(progress, session.profile, session.id) : undefined
+  )
 
   // An archived session has no live status to paint, so the archive glyph takes
   // the lead slot the dot would occupy instead of adding a column of its own.
@@ -366,7 +372,7 @@ function SidebarSessionRowImpl({
           // Middle-click = open in a new tab (browser muscle memory).
           {...middleClickHandlers(() => {
             triggerHaptic('selection')
-            openSession(session.id, () => undefined, 'tab')
+            openSession(session.id, () => undefined, 'tab', session.profile)
           })}
           onClick={event => {
             const mod = event.metaKey || event.ctrlKey
@@ -376,7 +382,7 @@ function SidebarSessionRowImpl({
               event.preventDefault()
               event.stopPropagation()
               triggerHaptic('selection')
-              openSession(session.id, () => undefined, 'window')
+              openSession(session.id, () => undefined, 'window', session.profile)
 
               return
             }
@@ -386,7 +392,7 @@ function SidebarSessionRowImpl({
               event.preventDefault()
               event.stopPropagation()
               triggerHaptic('selection')
-              openSession(session.id, () => undefined, 'tab')
+              openSession(session.id, () => undefined, 'tab', session.profile)
 
               return
             }

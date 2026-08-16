@@ -1,6 +1,7 @@
 import { atom, computed } from 'nanostores'
 
-import { $gateway } from './gateway'
+import { $gateway, requestGatewayForProfile } from './gateway'
+import { $activeGatewayProfile, normalizeProfileKey } from './profile'
 import { $activeSessionId } from './session'
 
 export interface ClarifyRequest {
@@ -8,6 +9,7 @@ export interface ClarifyRequest {
   question: string
   choices: string[] | null
   sessionId: string | null
+  profile?: string
 }
 
 /**
@@ -56,7 +58,8 @@ export function warnDroppedChoices(source: 'gateway' | 'tool_args', question: st
 // park its clarify request while the user is looking at a different chat, then
 // resolve it once they switch over — without a second concurrent clarify
 // clobbering the first. A request with no session id lands under the empty key.
-const keyFor = (sessionId: string | null | undefined): string => sessionId ?? ''
+export const promptSessionKey = (sessionId: string | null | undefined, profile?: null | string): string =>
+  profile == null ? (sessionId ?? '') : `${normalizeProfileKey(profile)}\u0000${sessionId ?? ''}`
 
 export const $clarifyRequests = atom<Record<string, ClarifyRequest>>({})
 
@@ -64,26 +67,37 @@ export const $clarifyRequests = atom<Record<string, ClarifyRequest>>({})
 // only ever mounts inside the active session's transcript, so it reads this
 // focus-scoped view rather than reaching into the whole map.
 export const $clarifyRequest = computed(
-  [$clarifyRequests, $activeSessionId],
-  (requests, activeId) => requests[keyFor(activeId)] ?? null
+  [$clarifyRequests, $activeSessionId, $activeGatewayProfile],
+  (requests, activeId, profile) =>
+    requests[promptSessionKey(activeId, profile)] ?? requests[promptSessionKey(activeId)] ?? null
 )
 
 /** The clarify request for one specific session — the tile counterpart of the
  *  active-session `$clarifyRequest` view (same map, fixed key). */
-export const sessionClarifyRequest = (sessionId: string | null) =>
-  computed($clarifyRequests, requests => requests[keyFor(sessionId)] ?? null)
+export const sessionClarifyRequest = (
+  sessionId: string | null,
+  profile?: null | string,
+  allowLegacyFallback = false
+) =>
+  computed(
+    $clarifyRequests,
+    requests =>
+      requests[promptSessionKey(sessionId, profile)] ??
+      (allowLegacyFallback ? requests[promptSessionKey(sessionId)] : null) ??
+      null
+  )
 
 export function setClarifyRequest(request: ClarifyRequest): void {
-  $clarifyRequests.set({ ...$clarifyRequests.get(), [keyFor(request.sessionId)]: request })
+  $clarifyRequests.set({ ...$clarifyRequests.get(), [promptSessionKey(request.sessionId, request.profile)]: request })
 }
 
-export function clearClarifyRequest(requestId?: string, sessionId?: string | null): void {
+export function clearClarifyRequest(requestId?: string, sessionId?: string | null, profile?: null | string): void {
   const requests = $clarifyRequests.get()
 
   // Targeted clear when the caller knows the session (the common path from the
   // inline ClarifyTool answering its own request).
   if (sessionId !== undefined) {
-    const key = keyFor(sessionId)
+    const key = promptSessionKey(sessionId, profile)
     const current = requests[key]
 
     if (!current || (requestId && current.requestId !== requestId)) {
@@ -117,8 +131,8 @@ export function clearClarifyRequest(requestId?: string, sessionId?: string | nul
 
 /** Whether `sessionId` has a clarify parked on it right now (imperative read —
  *  the composer checks this on Enter, not on every render). */
-export const hasClarifyRequest = (sessionId: string | null | undefined): boolean =>
-  Boolean($clarifyRequests.get()[keyFor(sessionId)])
+export const hasClarifyRequest = (sessionId: string | null | undefined, profile?: null | string): boolean =>
+  Boolean($clarifyRequests.get()[promptSessionKey(sessionId, profile)])
 
 /**
  * Answer `sessionId`'s pending clarify with an empty answer (a skip) and drop it
@@ -133,8 +147,8 @@ export const hasClarifyRequest = (sessionId: string | null | undefined): boolean
  * An empty answer is the same thing the card's own Skip button sends, and
  * `clarify.respond` is `allow_expired`, so racing the timeout is harmless.
  */
-export async function skipClarifyRequest(sessionId: string | null | undefined): Promise<boolean> {
-  const request = $clarifyRequests.get()[keyFor(sessionId)]
+export async function skipClarifyRequest(sessionId: string | null | undefined, profile?: null | string): Promise<boolean> {
+  const request = $clarifyRequests.get()[promptSessionKey(sessionId, profile)]
 
   if (!request) {
     return false
@@ -142,10 +156,14 @@ export async function skipClarifyRequest(sessionId: string | null | undefined): 
 
   // Clear first: the answer is already decided, and an in-flight RPC must not
   // leave a live card the user can answer a second time.
-  clearClarifyRequest(request.requestId, request.sessionId)
+  clearClarifyRequest(request.requestId, request.sessionId, request.profile)
 
   try {
-    await $gateway.get()?.request('clarify.respond', { request_id: request.requestId, answer: '' })
+    if (request.profile) {
+      await requestGatewayForProfile(request.profile, 'clarify.respond', { request_id: request.requestId, answer: '' })
+    } else {
+      await $gateway.get()?.request('clarify.respond', { request_id: request.requestId, answer: '' })
+    }
   } catch {
     // The tool times out on its own; a failed skip must never swallow the
     // message the user is actually sending.

@@ -6,6 +6,7 @@ import { preserveLocalAssistantErrors } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { persistInFlightTurnState } from '@/lib/inflight-turn-journal'
 import { setMutableRef } from '@/lib/mutable-ref'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import {
   $activeSessionId,
   $busy,
@@ -20,7 +21,7 @@ import {
   setTurnStartedAt,
   setYoloActive
 } from '@/store/session'
-import { publishSessionState } from '@/store/session-states'
+import { publishSessionState, sessionRuntimeStateKey } from '@/store/session-states'
 
 import type { ClientSessionState } from '../../types'
 
@@ -83,19 +84,32 @@ export function useSessionStateCache({
 
   const sessionStateByRuntimeIdRef = useRef(new Map<string, ClientSessionState>())
   const runtimeIdByStoredSessionIdRef = useRef(new Map<string, string>())
-  const pendingViewStateRef = useRef<{ sessionId: string; state: ClientSessionState } | null>(null)
+
+  const pendingViewStateRef = useRef<{
+    profile?: null | string
+    sessionId: string
+    state: ClientSessionState
+  } | null>(null)
+
   const viewSyncRafRef = useRef<number | null>(null)
   // Runtime id whose transcript currently occupies `$messages` — lets the
   // flush below tell a same-session refresh from a thread switch.
   const viewSessionIdRef = useRef<string | null>(null)
+
+  const isForegroundProfile = (profile?: null | string) =>
+    profile == null || normalizeProfileKey(profile) === normalizeProfileKey($activeGatewayProfile.get())
+
+  const storedSessionStateKey = (storedSessionId: string, profile?: null | string) =>
+    profile == null ? storedSessionId : `${normalizeProfileKey(profile)}\u0000${storedSessionId}`
 
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
     setMutableRef(busyRef, busy)
   }, [busy, busyRef])
 
-  const ensureSessionState = useCallback((sessionId: string, storedSessionId?: string | null) => {
-    const existing = sessionStateByRuntimeIdRef.current.get(sessionId)
+  const ensureSessionState = useCallback((sessionId: string, storedSessionId?: string | null, profile?: null | string) => {
+    const stateKey = sessionRuntimeStateKey(profile, sessionId)
+    const existing = sessionStateByRuntimeIdRef.current.get(stateKey)
 
     if (existing) {
       if (storedSessionId !== undefined && storedSessionId !== existing.storedSessionId) {
@@ -104,7 +118,7 @@ export function useSessionStateCache({
         // the PREVIOUS state to detect transitions (busy→idle, id rotation).
         const updated = { ...existing, storedSessionId }
 
-        sessionStateByRuntimeIdRef.current.set(sessionId, updated)
+        sessionStateByRuntimeIdRef.current.set(stateKey, updated)
 
         // Drop the obsolete stored→runtime reverse mapping as soon as the id
         // rotates (e.g. auto-compression forks a continuation). Leaving the
@@ -116,11 +130,11 @@ export function useSessionStateCache({
         // updater is a no-op — fire it here so the route-follow effect still
         // tracks compression without needing a dummy state write.
         if (existing.storedSessionId && existing.storedSessionId !== storedSessionId) {
-          runtimeIdByStoredSessionIdRef.current.delete(existing.storedSessionId)
+          runtimeIdByStoredSessionIdRef.current.delete(storedSessionStateKey(existing.storedSessionId, profile))
 
           // A rotation event needs a real next id — a null/cleared stored id
           // is a detach, not a rotation the route-follow effect should chase.
-          if (storedSessionId && sessionId === $activeSessionId.get()) {
+          if (storedSessionId && sessionId === $activeSessionId.get() && isForegroundProfile(profile)) {
             setActiveSessionStoredIdRotation({
               nextStoredSessionId: storedSessionId,
               previousStoredSessionId: existing.storedSessionId,
@@ -130,18 +144,18 @@ export function useSessionStateCache({
         }
 
         if (storedSessionId) {
-          runtimeIdByStoredSessionIdRef.current.set(storedSessionId, sessionId)
+          runtimeIdByStoredSessionIdRef.current.set(storedSessionStateKey(storedSessionId, profile), sessionId)
         }
       }
 
-      return sessionStateByRuntimeIdRef.current.get(sessionId)!
+      return sessionStateByRuntimeIdRef.current.get(stateKey)!
     }
 
     const created = createClientSessionState(storedSessionId ?? null)
-    sessionStateByRuntimeIdRef.current.set(sessionId, created)
+    sessionStateByRuntimeIdRef.current.set(stateKey, created)
 
     if (storedSessionId) {
-      runtimeIdByStoredSessionIdRef.current.set(storedSessionId, sessionId)
+      runtimeIdByStoredSessionIdRef.current.set(storedSessionStateKey(storedSessionId, profile), sessionId)
     }
 
     return created
@@ -163,7 +177,7 @@ export function useSessionStateCache({
     const pending = pendingViewStateRef.current
     pendingViewStateRef.current = null
 
-    if (!pending || pending.sessionId !== activeSessionIdRef.current) {
+    if (!pending || pending.sessionId !== activeSessionIdRef.current || !isForegroundProfile(pending.profile)) {
       return
     }
 
@@ -186,8 +200,10 @@ export function useSessionStateCache({
     // an out-of-funds error) onto this one — then cascade it everywhere as the
     // polluted view becomes the next switch's baseline. Only carry errors
     // across a same-session refresh; our cached state already keeps its own.
+    const pendingViewKey = sessionRuntimeStateKey(pending.profile, pending.sessionId)
+
     const nextMessages =
-      viewSessionIdRef.current === pending.sessionId
+      viewSessionIdRef.current === pendingViewKey
         ? preserveLocalAssistantErrors(pending.state.messages, currentMessages)
         : pending.state.messages
 
@@ -195,7 +211,7 @@ export function useSessionStateCache({
       setMessages(nextMessages)
     }
 
-    viewSessionIdRef.current = pending.sessionId
+    viewSessionIdRef.current = pendingViewKey
 
     syncRuntimeMetadataToView(pending.state)
     setBusy(pending.state.busy)
@@ -208,7 +224,7 @@ export function useSessionStateCache({
   }, [busyRef, setAwaitingResponse, setBusy, setMessages])
 
   const syncSessionStateToView = useCallback(
-    (sessionId: string, state: ClientSessionState) => {
+    (sessionId: string, state: ClientSessionState, profile?: null | string) => {
       // Only the currently-viewed session may stage into the shared `$messages`
       // view. A background session (e.g. one still busy and emitting stream /
       // error updates after the user toggled away) must update its own cache
@@ -218,12 +234,12 @@ export function useSessionStateCache({
       // prevents a background write from overwriting an already-pending
       // foreground write within the same animation frame (only one RAF is
       // scheduled, so the last `pendingViewStateRef` writer would otherwise win).
-      if (sessionId !== activeSessionIdRef.current) {
+      if (sessionId !== activeSessionIdRef.current || !isForegroundProfile(profile)) {
         return
       }
 
       syncRuntimeMetadataToView(state)
-      pendingViewStateRef.current = { sessionId, state }
+      pendingViewStateRef.current = { profile, sessionId, state }
 
       // Terminal / attention transitions (turn finished, error, or the agent is
       // now waiting on the user) MUST reach the view immediately. Electron
@@ -280,9 +296,11 @@ export function useSessionStateCache({
     (
       sessionId: string,
       updater: (state: ClientSessionState) => ClientSessionState,
-      storedSessionId?: string | null
+      storedSessionId?: string | null,
+      profile?: null | string
     ) => {
-      const previous = ensureSessionState(sessionId, storedSessionId)
+      const stateKey = sessionRuntimeStateKey(profile, sessionId)
+      const previous = ensureSessionState(sessionId, storedSessionId, profile)
       // Give the updater the raw previous state so it can return the same
       // reference when nothing changed (the caller sees a no-op). Previously
       // the param was always a fresh spread, so every call looked like a
@@ -299,7 +317,7 @@ export function useSessionStateCache({
         return previous
       }
 
-      sessionStateByRuntimeIdRef.current.set(sessionId, next)
+      sessionStateByRuntimeIdRef.current.set(stateKey, next)
       // Crash-survivable turn progress: journal the running turn's visible
       // tail (throttled localStorage write; cleared the moment the turn
       // settles) so a renderer/app death mid-turn can be recovered on resume.
@@ -307,22 +325,31 @@ export function useSessionStateCache({
       // Publishing to $sessionStates automatically fires transition side-effects
       // (watchdog, settle grace, unread marker, compression id rotation) inside
       // publishSessionState — no manual transition call needed.
-      publishSessionState(sessionId, next)
-      syncSessionStateToView(sessionId, next)
+      publishSessionState(sessionId, next, profile)
+      syncSessionStateToView(sessionId, next, profile)
 
       return next
     },
     [ensureSessionState, syncSessionStateToView]
   )
 
-  const getRuntimeIdForStoredSession = useCallback((storedSessionId: string): string | null => {
-    const runtimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
+  const getRuntimeIdForStoredSession = useCallback((storedSessionId: string, profile?: null | string): string | null => {
+    const lookupProfile = profile === undefined ? $activeGatewayProfile.get() : profile
+    let runtimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionStateKey(storedSessionId, lookupProfile))
+    let runtimeProfile: null | string | undefined = lookupProfile
+
+    // Omitted profile is the primary legacy API: prefer the dynamically active
+    // profile-qualified binding, then accept an older naked cache entry.
+    if (!runtimeId && profile === undefined) {
+      runtimeId = runtimeIdByStoredSessionIdRef.current.get(storedSessionId)
+      runtimeProfile = undefined
+    }
 
     if (!runtimeId) {
       return null
     }
 
-    const runtimeState = sessionStateByRuntimeIdRef.current.get(runtimeId)
+    const runtimeState = sessionStateByRuntimeIdRef.current.get(sessionRuntimeStateKey(runtimeProfile, runtimeId))
 
     return runtimeState?.storedSessionId === storedSessionId ? runtimeId : null
   }, [])

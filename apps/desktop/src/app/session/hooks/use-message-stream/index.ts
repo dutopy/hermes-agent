@@ -23,6 +23,7 @@ import {
 import { parseTodos } from '@/lib/todos'
 import { dispatchNativeNotification } from '@/store/native-notifications'
 import { isDiskFullErrorMessage, notifyError } from '@/store/notifications'
+import { sessionRuntimeStateKey } from '@/store/session-states'
 import { broadcastSessionsChanged } from '@/store/session-sync'
 import { upsertSubagent } from '@/store/subagents'
 import { setSessionTodos } from '@/store/todos'
@@ -38,7 +39,8 @@ interface MessageStreamOptions {
   hydrateFromStoredSession: (
     attempts?: number,
     storedSessionId?: string | null,
-    runtimeSessionId?: string | null
+    runtimeSessionId?: string | null,
+    profile?: string
   ) => Promise<void>
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
@@ -47,13 +49,16 @@ interface MessageStreamOptions {
   updateSessionState: (
     sessionId: string,
     updater: (state: ClientSessionState) => ClientSessionState,
-    storedSessionId?: string | null
+    storedSessionId?: string | null,
+    profile?: null | string
   ) => ClientSessionState
 }
 
 interface QueuedStreamDeltas {
   assistant: string
+  profile?: string
   reasoning: string
+  runtimeSessionId: string
 }
 
 // Date.now() alone can collide when an interim seal and the next segment's
@@ -74,7 +79,8 @@ export function useMessageStream({
   updateSessionState
 }: MessageStreamOptions) {
   const sessionInterrupted = useCallback(
-    (sessionId: string) => sessionStateByRuntimeIdRef.current.get(sessionId)?.interrupted ?? false,
+    (sessionId: string, profile?: string) =>
+      sessionStateByRuntimeIdRef.current.get(sessionRuntimeStateKey(profile, sessionId))?.interrupted ?? false,
     [sessionStateByRuntimeIdRef]
   )
 
@@ -87,7 +93,8 @@ export function useMessageStream({
       seed: () => ChatMessagePart[],
       opts: {
         pending?: (message: ChatMessage) => boolean
-      } = {}
+      } = {},
+      profile?: string
     ) => {
       const apply = () => {
         updateSessionState(sessionId, state => {
@@ -134,7 +141,7 @@ export function useMessageStream({
             sawAssistantPayload: true,
             awaitingResponse: false
           }
-        })
+        }, undefined, profile)
       }
 
       apply()
@@ -199,9 +206,9 @@ export function useMessageStream({
   const lastCwdInfoSessionRef = useRef<null | string>(null)
 
   const flushQueuedDeltas = useCallback(
-    (sessionId?: string) => {
+    (sessionId?: string, profile?: string) => {
       const queue = queuedDeltasRef.current
-      const ids = sessionId ? [sessionId] : [...queue.keys()]
+      const ids = sessionId ? [sessionRuntimeStateKey(profile, sessionId)] : [...queue.keys()]
 
       for (const id of ids) {
         const queued = queue.get(id)
@@ -214,17 +221,21 @@ export function useMessageStream({
 
         if (queued.assistant) {
           mutateStream(
-            id,
+            queued.runtimeSessionId,
             parts => dedupeGeneratedImageEchoesInParts(appendAssistantTextPart(parts, queued.assistant)),
-            () => [assistantTextPart(queued.assistant)]
+            () => [assistantTextPart(queued.assistant)],
+            {},
+            queued.profile
           )
         }
 
         if (queued.reasoning) {
           mutateStream(
-            id,
+            queued.runtimeSessionId,
             parts => appendReasoningPart(parts, queued.reasoning),
-            () => [reasoningPart(queued.reasoning)]
+            () => [reasoningPart(queued.reasoning)],
+            {},
+            queued.profile
           )
         }
       }
@@ -329,14 +340,20 @@ export function useMessageStream({
   }, [flushQueuedDeltas])
 
   const queueDelta = useCallback(
-    (sessionId: string, key: keyof QueuedStreamDeltas, delta: string) => {
+    (sessionId: string, key: 'assistant' | 'reasoning', delta: string, profile?: string) => {
       if (!delta) {
         return
       }
 
-      const queued = queuedDeltasRef.current.get(sessionId) ?? { assistant: '', reasoning: '' }
+      const stateKey = sessionRuntimeStateKey(profile, sessionId)
+      const queued = queuedDeltasRef.current.get(stateKey) ?? {
+        assistant: '',
+        profile,
+        reasoning: '',
+        runtimeSessionId: sessionId
+      }
       queued[key] += delta
-      queuedDeltasRef.current.set(sessionId, queued)
+      queuedDeltasRef.current.set(stateKey, queued)
       scheduleDeltaFlush()
     },
     [scheduleDeltaFlush]
@@ -390,29 +407,29 @@ export function useMessageStream({
   }, [flushQueuedDeltas])
 
   const appendAssistantDelta = useCallback(
-    (sessionId: string, delta: string) => {
+    (sessionId: string, delta: string, profile?: string) => {
       if (!delta) {
         return
       }
 
-      queueDelta(sessionId, 'assistant', delta)
+      queueDelta(sessionId, 'assistant', delta, profile)
     },
     [queueDelta]
   )
 
   const appendReasoningDelta = useCallback(
-    (sessionId: string, delta: string, replace = false) => {
+    (sessionId: string, delta: string, replace = false, profile?: string) => {
       if (!delta) {
         return
       }
 
       if (!replace) {
-        queueDelta(sessionId, 'reasoning', delta)
+        queueDelta(sessionId, 'reasoning', delta, profile)
 
         return
       }
 
-      flushQueuedDeltas(sessionId)
+      flushQueuedDeltas(sessionId, profile)
 
       mutateStream(
         sessionId,
@@ -427,7 +444,9 @@ export function useMessageStream({
 
           return appendReasoningPart(parts, delta)
         },
-        () => [reasoningPart(delta)]
+        () => [reasoningPart(delta)],
+        {},
+        profile
       )
     },
     [flushQueuedDeltas, mutateStream, queueDelta]
@@ -438,13 +457,14 @@ export function useMessageStream({
       sessionId: string,
       payload: GatewayEventPayload | undefined,
       phase: 'running' | 'complete',
-      sourceEventType?: string
+      sourceEventType?: string,
+      profile?: string
     ) => {
       // Text deltas flush on a timer but tool events apply now; flush first so
       // a tool part can't jump ahead of the text that preceded it.
-      flushQueuedDeltas(sessionId)
+      flushQueuedDeltas(sessionId, profile)
 
-      if (sessionInterrupted(sessionId)) {
+      if (sessionInterrupted(sessionId, profile)) {
         return
       }
 
@@ -454,17 +474,20 @@ export function useMessageStream({
         const todos = parseTodos(payload.todos) ?? parseTodos(payload.result) ?? parseTodos(payload.args)
 
         if (todos) {
-          setSessionTodos(sessionId, todos)
+          setSessionTodos(sessionId, todos, profile)
         }
       }
 
-      if (!nativeSubagentSessionsRef.current.has(sessionId)) {
+      const runtimeKey = sessionRuntimeStateKey(profile, sessionId)
+
+      if (!nativeSubagentSessionsRef.current.has(runtimeKey)) {
         for (const subagentPayload of delegateTaskPayloads(payload, phase, sourceEventType)) {
           upsertSubagent(
             sessionId,
             subagentPayload,
             true,
-            phase === 'complete' ? 'delegate.complete' : 'delegate.running'
+            phase === 'complete' ? 'delegate.complete' : 'delegate.running',
+            profile
           )
         }
       }
@@ -473,14 +496,15 @@ export function useMessageStream({
         sessionId,
         parts => dedupeGeneratedImageEchoesInParts(upsertToolPart(parts, payload, phase)),
         () => upsertToolPart([], payload, phase),
-        { pending: m => phase !== 'complete' || (m.pending ?? false) }
+        { pending: m => phase !== 'complete' || (m.pending ?? false) },
+        profile
       )
     },
     [flushQueuedDeltas, mutateStream, sessionInterrupted]
   )
 
   const finalizeInterimAssistantMessage = useCallback(
-    (sessionId: string, text: string) => {
+    (sessionId: string, text: string, profile?: string) => {
       updateSessionState(sessionId, state => {
         if (state.interrupted) {
           return state
@@ -530,13 +554,19 @@ export function useMessageStream({
           interimBoundaryPending: true,
           sawAssistantPayload: state.sawAssistantPayload || Boolean(authoritativeText)
         }
-      })
+      }, undefined, profile)
     },
     [updateSessionState]
   )
 
   const completeAssistantMessage = useCallback(
-    (sessionId: string, text: string, responsePreviewed?: boolean, failure?: { error: string; partial: boolean }) => {
+    (
+      sessionId: string,
+      text: string,
+      responsePreviewed?: boolean,
+      failure?: { diskFull?: boolean; error: string; partial: boolean },
+      profile?: string
+    ) => {
       let shouldHydrate = false
 
       const completedState = updateSessionState(sessionId, state => {
@@ -679,7 +709,7 @@ export function useMessageStream({
           interimBoundaryPending: false,
           turnStartedAt: null
         }
-      })
+      }, undefined, profile)
 
       // Persistence / mid-turn disk-full failures land as a terminal frame with
       // an error string, not a rejected prompt.submit. Toast them here so a
@@ -688,8 +718,9 @@ export function useMessageStream({
       // "disk full".
       const diskFullSignal = failure?.error || (failure ? text : '')
 
-      if (diskFullSignal && isDiskFullErrorMessage(diskFullSignal)) {
-        notifyError(new Error(diskFullSignal), translateNow('notifications.errors.diskFull'))
+      if (failure?.diskFull || (diskFullSignal && isDiskFullErrorMessage(diskFullSignal))) {
+        const fallback = translateNow('notifications.errors.diskFull')
+        notifyError(new Error(profile ? fallback : diskFullSignal), fallback)
       }
 
       scheduleSessionsRefresh()
@@ -699,12 +730,13 @@ export function useMessageStream({
       }
 
       if (shouldHydrate) {
-        void hydrateFromStoredSession(3, completedState.storedSessionId, sessionId)
+        void hydrateFromStoredSession(3, completedState.storedSessionId, sessionId, profile)
       }
 
       dispatchNativeNotification({
         body: text.slice(0, 140) || translateNow('notifications.native.turnDoneBody'),
         kind: 'turnDone',
+        profile,
         sessionId,
         title: translateNow('notifications.native.turnDoneTitle')
       })
@@ -713,7 +745,7 @@ export function useMessageStream({
   )
 
   const failAssistantMessage = useCallback(
-    (sessionId: string, errorMessage: string) => {
+    (sessionId: string, errorMessage: string, profile?: string) => {
       updateSessionState(sessionId, state => {
         const streamId = state.streamId ?? `assistant-error-${Date.now()}`
         const groupId = state.pendingBranchGroup ?? undefined
@@ -754,7 +786,7 @@ export function useMessageStream({
           interimBoundaryPending: false,
           turnStartedAt: null
         }
-      })
+      }, undefined, profile)
     },
     [updateSessionState]
   )

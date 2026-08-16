@@ -9,6 +9,7 @@ import { useI18n } from '@/i18n'
 import { type SidebarListRow } from '@/lib/session-date-groups'
 import { sessionBucketLabel } from '@/lib/time'
 import { cn } from '@/lib/utils'
+import { normalizeProfileKey } from '@/store/profile'
 import { sessionPinId } from '@/store/session'
 
 import { SidebarDateDivider } from './chrome'
@@ -36,11 +37,11 @@ export interface VirtualSessionListProps {
   /** Hover-revealed control for date dividers (the group-level "+"). */
   dividerAction?: React.ReactNode
   rows: SidebarListRow[]
-  onArchiveSession: (sessionId: string) => void
+  onArchiveSession: (sessionId: string, profile?: string) => void
   onBranchSession?: (sessionId: string, profile?: string) => void
-  onDeleteSession: (sessionId: string) => void
-  onResumeSession: (sessionId: string) => void
-  onTogglePin: (sessionId: string) => void
+  onDeleteSession: (sessionId: string, profile?: string) => void
+  onResumeSession: (sessionId: string, profile?: string) => void
+  onTogglePin: (sessionId: string, profile?: string) => void
   pinned: boolean
   showProfileTags?: boolean
   sortable: boolean
@@ -78,7 +79,11 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
     getItemKey: index => {
       const row = listRows[index]
 
-      return row ? (row.kind === 'divider' ? row.key : row.entry.session.id) : index
+      return row
+        ? row.kind === 'divider'
+          ? row.key
+          : `${normalizeProfileKey(row.entry.session.profile)}\u0000${row.entry.session.id}`
+        : index
     },
     getScrollElement: () => scrollerRef.current,
     // jsdom-friendly default; the real rect takes over on first observe.
@@ -113,17 +118,18 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
 
     const { branchStem, session } = row.entry
     const reorderable = sortable && !branchStem
+    const ownerProfile = session.profile ? normalizeProfileKey(session.profile) : undefined
 
     const commonProps: SessionRowCommonProps = {
       branchStem,
       card,
       isPinned: pinned,
       isSelected: session.id === activeSessionId,
-      onArchive: () => onArchiveSession(session.id),
-      onBranch: onBranchSession ? () => onBranchSession(session.id, session.profile) : undefined,
-      onDelete: () => onDeleteSession(session.id),
-      onPin: () => onTogglePin(sessionPinId(session)),
-      onResume: () => onResumeSession(session.id),
+      onArchive: () => onArchiveSession(session.id, ownerProfile),
+      onBranch: onBranchSession ? () => onBranchSession(session.id, ownerProfile) : undefined,
+      onDelete: () => onDeleteSession(session.id, ownerProfile),
+      onPin: () => onTogglePin(sessionPinId(session), ownerProfile),
+      onResume: () => onResumeSession(session.id, ownerProfile),
       reorderable,
       showProfile: showProfileTags
     }
@@ -131,7 +137,7 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
     return reorderable ? (
       <VirtualSortableRow
         index={virtualItem.index}
-        key={session.id}
+        key={`${ownerProfile ?? 'legacy'}\u0000${session.id}`}
         measureRef={virtualizer.measureElement}
         rowProps={commonProps}
         session={session}
@@ -140,7 +146,7 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
       <SidebarSessionRow
         {...commonProps}
         data-index={virtualItem.index}
-        key={session.id}
+        key={`${ownerProfile ?? 'legacy'}\u0000${session.id}`}
         ref={virtualizer.measureElement}
         session={session}
       />

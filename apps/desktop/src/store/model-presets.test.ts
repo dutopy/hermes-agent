@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { $modelPresets, applyModelPreset, getModelPreset, modelPresetKey, setModelPreset } from './model-presets'
 import { $currentFastMode, $currentReasoningEffort, setCurrentFastMode, setCurrentReasoningEffort } from './session'
+import { setSessionTileDelegate } from './session-states'
 
 describe('model presets', () => {
   beforeEach(() => {
@@ -9,6 +10,8 @@ describe('model presets', () => {
     setCurrentFastMode(false)
     setCurrentReasoningEffort('')
   })
+
+  afterEach(() => setSessionTileDelegate(null))
 
   it('round-trips a preset and merges patches without dropping prior fields', () => {
     setModelPreset('anthropic', 'claude-opus-4-8', { effort: 'high' })
@@ -54,5 +57,17 @@ describe('model presets', () => {
     expect($currentReasoningEffort.get()).toBe('high')
     expect($currentFastMode.get()).toBe(true)
     expect(calls).toEqual([])
+  })
+
+  it('updates an embedded preset only in its owner profile state', async () => {
+    const updateSession = vi.fn()
+    setSessionTileDelegate({ updateSession } as never)
+
+    await applyModelPreset(
+      { effort: 'high', fast: true },
+      { failMessage: 'x', primary: false, profile: 'profile-b', request: vi.fn(), sessionId: 'shared-runtime' }
+    )
+
+    expect(updateSession).toHaveBeenCalledWith('shared-runtime', expect.any(Function), 'profile-b')
   })
 })

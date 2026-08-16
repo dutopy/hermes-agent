@@ -1,6 +1,7 @@
 import { atom } from 'nanostores'
 
 import { applyReaction } from '@/store/reactions'
+import { sessionRuntimeStateKey } from '@/store/session-states'
 import type { MessageReaction } from '@/types/hermes'
 
 /**
@@ -14,6 +15,30 @@ import type { MessageReaction } from '@/types/hermes'
  */
 export const $localReactions = atom<Record<string, MessageReaction[]>>({})
 
+export interface LocalReactionScope {
+  profile: string
+  rowId?: number
+  storedSessionId: string
+}
+
+function localReactionKey(messageId: string, scope?: LocalReactionScope): string {
+  if (!scope) {
+    return messageId
+  }
+
+  const messageIdentity = scope.rowId === undefined ? `message:${messageId}` : `row:${scope.rowId}:message:${messageId}`
+
+  return `${sessionRuntimeStateKey(scope.profile, scope.storedSessionId)}::${messageIdentity}`
+}
+
+export function localReactionOverlay(
+  overlays: Record<string, MessageReaction[]>,
+  messageId: string,
+  scope?: LocalReactionScope
+): MessageReaction[] | undefined {
+  return overlays[localReactionKey(messageId, scope)]
+}
+
 /**
  * Agent reactions announced live (`message.reaction` events), keyed by the
  * DURABLE row id — never the renderer message id, which the end-of-turn
@@ -23,14 +48,59 @@ export const $localReactions = atom<Record<string, MessageReaction[]>>({})
  * carry a reaction written to the DB mid-turn — this overlay outlives that
  * clobber and a real reload hydrates the same reaction from disk.
  */
-export const $agentReactions = atom<Record<number, MessageReaction[]>>({})
+export const $agentReactions = atom<Record<string, MessageReaction[]>>({})
+
+function agentReactionKey(rowId: number, profile?: null | string, storedSessionId?: null | string): string {
+  if (profile) {
+    return `${sessionRuntimeStateKey(profile, storedSessionId ?? '')}::${rowId}`
+  }
+
+  return String(rowId)
+}
+
+export function agentReactionOverlay(
+  overlays: Record<string, MessageReaction[]>,
+  rowId: number,
+  profile?: null | string,
+  storedSessionId?: null | string
+): MessageReaction[] | undefined {
+  return overlays[agentReactionKey(rowId, profile, storedSessionId)]
+}
 
 /** Record an agent reaction painted from a live gateway event. */
-export function recordAgentReaction(rowId: number, reactions: MessageReaction[]): void {
+export function recordAgentReaction(
+  rowId: number,
+  reactions: MessageReaction[],
+  profile?: null | string,
+  storedSessionId?: null | string
+): void {
   $agentReactions.set({
     ...$agentReactions.get(),
-    [rowId]: reactions.filter(reaction => reaction.author === 'agent')
+    [agentReactionKey(rowId, profile, storedSessionId)]: reactions.filter(reaction => reaction.author === 'agent')
   })
+}
+
+/** Permanently remove renderer reaction overlays for one qualified durable
+ * conversation. Bare legacy overlays belong to an omitted-profile caller and
+ * must survive an explicit-profile discard. */
+export function clearSessionReactionOverlays(profile: string, storedSessionIds: readonly string[]): void {
+  const prefixes = storedSessionIds.map(storedSessionId => `${sessionRuntimeStateKey(profile, storedSessionId)}::`)
+  const withoutOwned = <T>(values: Record<string, T>): Record<string, T> =>
+    Object.fromEntries(Object.entries(values).filter(([key]) => !prefixes.some(prefix => key.startsWith(prefix))))
+
+  const local = $localReactions.get()
+  const nextLocal = withoutOwned(local)
+
+  if (Object.keys(nextLocal).length !== Object.keys(local).length) {
+    $localReactions.set(nextLocal)
+  }
+
+  const agent = $agentReactions.get()
+  const nextAgent = withoutOwned(agent)
+
+  if (Object.keys(nextAgent).length !== Object.keys(agent).length) {
+    $agentReactions.set(nextAgent)
+  }
 }
 
 /**
@@ -58,10 +128,11 @@ export function mergeReactions(
 }
 
 /** Toggle the user's reaction on a message — instant, local, no round-trip. */
-export function setLocalReaction(messageId: string, emoji: null | string): MessageReaction[] {
-  const next = applyReaction($localReactions.get()[messageId], emoji, 'user')
+export function setLocalReaction(messageId: string, emoji: null | string, scope?: LocalReactionScope): MessageReaction[] {
+  const key = localReactionKey(messageId, scope)
+  const next = applyReaction($localReactions.get()[key], emoji, 'user')
 
-  $localReactions.set({ ...$localReactions.get(), [messageId]: next })
+  $localReactions.set({ ...$localReactions.get(), [key]: next })
 
   return next
 }

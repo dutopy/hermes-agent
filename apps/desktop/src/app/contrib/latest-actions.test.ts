@@ -78,6 +78,21 @@ describe('latestActions adapters', () => {
     expect(latestNavigate).toHaveBeenCalledWith(item)
   })
 
+  it('forwards profile ownership through stable sidebar session actions', () => {
+    const actions = makeSidebarActions()
+    const adapted = latestSidebarActions(actions)
+
+    adapted.onArchiveSession('same', 'profile-b')
+    adapted.onDeleteSession('same', 'profile-b')
+    adapted.onBranchSession('same', 'profile-b')
+    adapted.onResumeSession('same', 'profile-b')
+
+    expect(actions.onArchiveSession).toHaveBeenCalledWith('same', 'profile-b')
+    expect(actions.onDeleteSession).toHaveBeenCalledWith('same', 'profile-b')
+    expect(actions.onBranchSession).toHaveBeenCalledWith('same', 'profile-b')
+    expect(actions.onResumeSession).toHaveBeenCalledWith('same', 'profile-b')
+  })
+
   // An absent optional handler must stay absent through the adapter. Children
   // gate on PRESENCE, not just invocation: onDismissError renders the dismiss
   // button only when defined, onRestoreToMessage gates the restore-confirm

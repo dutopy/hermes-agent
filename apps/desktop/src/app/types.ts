@@ -176,6 +176,7 @@ export interface ClientSessionState {
   messages: ChatMessage[]
   branch: string
   cwd: string
+  terminalBackend?: string
   model: string
   provider: string
   reasoningEffort: string

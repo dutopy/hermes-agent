@@ -781,13 +781,14 @@ export function upsertOptimisticSession(
   title: string | null = null,
   preview: string | null = null,
   parentSessionId: string | null = null,
-  lastActive?: number
+  lastActive?: number,
+  ownerProfile?: string
 ) {
   const now = lastActive ?? Date.now() / 1000
   // Stamp the profile the session was just created on (= the live gateway's
   // profile) so the scoped sidebar shows the new row immediately instead of
   // filtering it out as "default" until the aggregator re-fetches.
-  const profileKey = normalizeProfileKey($activeGatewayProfile.get())
+  const profileKey = normalizeProfileKey(ownerProfile ?? $activeGatewayProfile.get())
 
   const session: SessionInfo = {
     // Seed cwd so the grouped sidebar can place the new row in its repo/worktree
@@ -812,7 +813,13 @@ export function upsertOptimisticSession(
     tool_call_count: 0
   }
 
-  setSessions(prev => [session, ...prev.filter(s => s.id !== id)])
+  setSessions(prev => [
+    session,
+    ...prev.filter(
+      existing =>
+        normalizeProfileKey(existing.profile) !== profileKey || !sessionMatchesStoredId(existing, id)
+    )
+  ])
 }
 
 export function patchSessionWorkspace(sessionId: string, cwd: string | undefined) {
@@ -829,10 +836,15 @@ export function sessionShouldHaveTranscript(session: SessionInfo | undefined): b
 
 function upsertResolvedSession(session: SessionInfo, storedSessionId: string) {
   const lineage = session._lineage_root_id ?? session.id
+  const owner = normalizeProfileKey(session.profile)
 
   setSessions(prev => [
     session,
     ...prev.filter(existing => {
+      if (normalizeProfileKey(existing.profile) !== owner) {
+        return true
+      }
+
       if (sessionMatchesStoredId(existing, storedSessionId)) {
         return false
       }
@@ -842,8 +854,37 @@ function upsertResolvedSession(session: SessionInfo, storedSessionId: string) {
   ])
 }
 
-export async function resolveStoredSession(storedSessionId: string): Promise<SessionInfo | undefined> {
-  const cached = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
+export async function resolveStoredSession(
+  storedSessionId: string,
+  explicitProfile?: string
+): Promise<SessionInfo | undefined> {
+  const owner = explicitProfile === undefined ? undefined : normalizeProfileKey(explicitProfile)
+  const cached = $sessions
+    .get()
+    .find(
+      session =>
+        sessionMatchesStoredId(session, storedSessionId) &&
+        (owner === undefined || normalizeProfileKey(session.profile) === owner)
+    )
+
+  if (cached && owner !== undefined) {
+    return cached
+  }
+
+  // Explicit ownership is authoritative. Never probe the foreground or another
+  // profile for the same naked stored id: profile + stored id is the durable
+  // identity selected by all-profile surfaces.
+  if (owner !== undefined) {
+    try {
+      const session = await getSession(storedSessionId, owner)
+      session.profile = owner
+      upsertResolvedSession(session, storedSessionId)
+
+      return session
+    } catch {
+      return undefined
+    }
+  }
 
   // A row with no owning profile can't route a resume when more than one
   // profile exists — a resume without a profile lands on whichever gateway is

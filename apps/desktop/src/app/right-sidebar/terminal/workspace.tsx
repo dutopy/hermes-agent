@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useEffect } from 'react'
 
 import { $backgroundStatusBySession } from '@/store/composer-status'
+import { sessionRuntimeStateIdentity } from '@/store/session-states'
 
 import { seedAgentTerminalCommand, syncAgentTerminalSnapshot } from './agent-terminal-stream'
 import { setActiveTerminalId } from './buffer'
@@ -35,11 +36,19 @@ export function TerminalWorkspace({ onAddSelectionToChat }: TerminalWorkspacePro
   // Live chunks stream via agent.terminal.output; the process-list snapshot also
   // seeds/falls back so the tab never stays blank if the stream races startup.
   useEffect(() => {
-    for (const list of Object.values(background)) {
+    for (const [runtimeKey, list] of Object.entries(background)) {
+      const { profile } = sessionRuntimeStateIdentity(runtimeKey)
+
       for (const item of list) {
-        ensureAgentTerminal(item.id, item.title)
-        seedAgentTerminalCommand(item.id, item.title)
-        syncAgentTerminalSnapshot(item.id, item.output ?? '')
+        if (profile === null) {
+          ensureAgentTerminal(item.id, item.title)
+          seedAgentTerminalCommand(item.id, item.title)
+          syncAgentTerminalSnapshot(item.id, item.output ?? '')
+        } else {
+          ensureAgentTerminal(profile, item.id, item.title)
+          seedAgentTerminalCommand(profile, item.id, item.title)
+          syncAgentTerminalSnapshot(profile, item.id, item.output ?? '')
+        }
       }
     }
   }, [background])
@@ -48,7 +57,13 @@ export function TerminalWorkspace({ onAddSelectionToChat }: TerminalWorkspacePro
     <>
       {terminals.map(term =>
         term.kind === 'agent' ? (
-          <AgentTerminalInstance active={term.id === activeId} id={term.id} key={term.id} procId={term.procId!} />
+          <AgentTerminalInstance
+            active={term.id === activeId}
+            id={term.id}
+            key={term.id}
+            procId={term.procId!}
+            profile={term.profile}
+          />
         ) : (
           <TerminalInstance
             active={term.id === activeId}

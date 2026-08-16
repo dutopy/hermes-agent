@@ -18,8 +18,8 @@ import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { AlertCircle, ChevronDown, Loader2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
-import { $gateway } from '@/store/gateway'
-import { notifyError } from '@/store/notifications'
+import { $gateway, requestGatewayForProfile } from '@/store/gateway'
+import { notifyError, notifyPromptResponseError } from '@/store/notifications'
 import {
   type ApprovalRequest,
   clearApprovalRequest,
@@ -51,28 +51,41 @@ type ApprovalChoice = 'once' | 'session' | 'always' | 'deny'
 export const PendingToolApproval: FC<{ part: ToolPart }> = ({ part }) => {
   // The tool row lives in whichever session's transcript rendered it — read
   // THAT session's approval (works for the primary and every tile).
-  const sessionId = useStore(useSessionView().$runtimeId)
-  const $request = useMemo(() => sessionApprovalRequest(sessionId), [sessionId])
+  const view = useSessionView()
+  const sessionId = useStore(view.$runtimeId)
+  const allowLegacyFallback = view.kind === 'primary'
+  const $request = useMemo(
+    () => sessionApprovalRequest(sessionId, view.profile, allowLegacyFallback),
+    [allowLegacyFallback, sessionId, view.profile]
+  )
   const request = useStore($request)
 
   if (!request || !APPROVAL_TOOLS.has(part.toolName)) {
     return null
   }
 
-  return <InlineApprovalBar request={request} />
+  return <InlineApprovalBar profile={request.profile} request={request} />
 }
 
-const InlineApprovalBar: FC<{ request: ApprovalRequest }> = ({ request }) => {
-  useEffect(() => registerApprovalInlineAnchor(request.sessionId), [request.sessionId])
+const InlineApprovalBar: FC<{ profile?: string; request: ApprovalRequest }> = ({ profile, request }) => {
+  useEffect(() => registerApprovalInlineAnchor(request.sessionId, profile), [profile, request.sessionId])
 
-  return <ApprovalBar request={request} surface="inline" />
+  return <ApprovalBar profile={profile} request={request} surface="inline" />
 }
 
 export const PendingApprovalFallback: FC = () => {
   const { t } = useI18n()
-  const sessionId = useStore(useSessionView().$runtimeId)
-  const $request = useMemo(() => sessionApprovalRequest(sessionId), [sessionId])
-  const $inlineVisible = useMemo(() => sessionApprovalInlineVisible(sessionId), [sessionId])
+  const view = useSessionView()
+  const sessionId = useStore(view.$runtimeId)
+  const allowLegacyFallback = view.kind === 'primary'
+  const $request = useMemo(
+    () => sessionApprovalRequest(sessionId, view.profile, allowLegacyFallback),
+    [allowLegacyFallback, sessionId, view.profile]
+  )
+  const $inlineVisible = useMemo(
+    () => sessionApprovalInlineVisible(sessionId, view.profile, allowLegacyFallback),
+    [allowLegacyFallback, sessionId, view.profile]
+  )
   const request = useStore($request)
   const inlineVisible = useStore($inlineVisible)
 
@@ -94,7 +107,7 @@ export const PendingApprovalFallback: FC = () => {
             <span className="min-w-0 truncate text-(--ui-text-tertiary)">{request.description}</span>
           )}
         </div>
-        <ApprovalBar request={request} surface="floating" />
+        <ApprovalBar profile={request.profile} request={request} surface="floating" />
       </div>
     </div>
   )
@@ -102,7 +115,11 @@ export const PendingApprovalFallback: FC = () => {
 
 const isMac = typeof navigator !== 'undefined' && /Mac|iP(hone|ad|od)/.test(navigator.platform)
 
-const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline' }> = ({ request, surface }) => {
+const ApprovalBar: FC<{ profile?: string; request: ApprovalRequest; surface: 'floating' | 'inline' }> = ({
+  profile,
+  request,
+  surface
+}) => {
   const { t } = useI18n()
   const copy = t.assistant.approval
   const gateway = useStore($gateway)
@@ -126,14 +143,15 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
 
   const respond = useCallback(
     async (choice: ApprovalChoice) => {
+      const ownerProfile = request.profile
       // Another bar (or the keyboard path) may have already resolved this
       // approval; the map is the single source of truth, so bail if this
       // session's request is gone.
-      if (busy || !sessionApprovalRequest(request.sessionId).get()) {
+      if (busy || !sessionApprovalRequest(request.sessionId, ownerProfile).get()) {
         return
       }
 
-      if (!gateway) {
+      if (!ownerProfile && !gateway) {
         notifyError(new Error(copy.gatewayDisconnected), copy.sendFailed)
 
         return
@@ -142,18 +160,21 @@ const ApprovalBar: FC<{ request: ApprovalRequest; surface: 'floating' | 'inline'
       setSubmitting(choice)
 
       try {
-        await gateway.request<{ resolved?: boolean }>('approval.respond', {
-          choice,
-          session_id: request.sessionId ?? undefined
-        })
+        const params = { choice, session_id: request.sessionId ?? undefined }
+
+        if (ownerProfile) {
+          await requestGatewayForProfile<{ resolved?: boolean }>(ownerProfile, 'approval.respond', params)
+        } else {
+          await gateway!.request<{ resolved?: boolean }>('approval.respond', params)
+        }
         triggerHaptic(choice === 'deny' ? 'cancel' : 'submit')
-        clearApprovalRequest(request.sessionId)
+        clearApprovalRequest(request.sessionId, undefined, request.profile)
       } catch (error) {
-        notifyError(error, copy.sendFailed)
+        notifyPromptResponseError(error, copy.sendFailed, ownerProfile)
         setSubmitting(null)
       }
     },
-    [busy, copy.gatewayDisconnected, copy.sendFailed, gateway, request.sessionId]
+    [busy, copy.gatewayDisconnected, copy.sendFailed, gateway, request.profile, request.sessionId]
   )
 
   // ⌘/Ctrl+Enter → Run, Esc → Reject.

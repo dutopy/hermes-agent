@@ -1,8 +1,14 @@
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { createClientSessionState } from '@/lib/chat-runtime'
 import { $desktopBoot } from '@/store/boot'
-import { $currentCwd, $gatewayState } from '@/store/session'
+import { $activeGatewayProfile } from '@/store/profile'
+import { $secretRequest, clearAllPrompts, setSecretRequest } from '@/store/prompts'
+import { $activeSessionId, $currentCwd, $gatewayState } from '@/store/session'
+import { $sessionStates, publishSessionState } from '@/store/session-states'
+
+import { PRIMARY_SESSION_VIEW } from '../../chat/session-view'
 
 import { takeGatewaySurvivor } from './gateway-hmr-survivor'
 import { useGatewayBoot } from './use-gateway-boot'
@@ -69,6 +75,10 @@ class FakeWebSocket {
     this.emit('close', {})
   }
 
+  serverEvent(params: Record<string, unknown>) {
+    this.emit('message', { data: JSON.stringify({ jsonrpc: '2.0', method: 'event', params }) })
+  }
+
   private emit(type: string, ev: unknown) {
     for (const fn of this.listeners[type] ?? []) {
       fn(ev)
@@ -115,11 +125,16 @@ function fakeDesktop() {
 
 function Harness({
   beforeConnectionSwitch = () => undefined,
+  handleGatewayEvent = () => undefined,
   refreshSessions
-}: { beforeConnectionSwitch?: () => void; refreshSessions?: () => Promise<void> } = {}) {
+}: {
+  beforeConnectionSwitch?: () => void
+  handleGatewayEvent?: (event: Record<string, unknown>) => void
+  refreshSessions?: () => Promise<void>
+} = {}) {
   useGatewayBoot({
     beforeConnectionSwitch,
-    handleGatewayEvent: () => undefined,
+    handleGatewayEvent: handleGatewayEvent as never,
     onConnectionReady: () => undefined,
     onGatewayReady: () => undefined,
     refreshHermesConfig: async () => undefined,
@@ -150,6 +165,10 @@ beforeEach(() => {
   ;(globalThis as { WebSocket: unknown }).WebSocket = FakeWebSocket
   ;(window as { hermesDesktop?: unknown }).hermesDesktop = fakeDesktop()
   $gatewayState.set('idle')
+  $activeGatewayProfile.set('default')
+  $activeSessionId.set(null)
+  $sessionStates.set({})
+  clearAllPrompts()
   $desktopBoot.set({
     error: null,
     fakeMode: false,
@@ -182,6 +201,10 @@ afterEach(() => {
   delete (window as { hermesDesktop?: unknown }).hermesDesktop
   window.localStorage.removeItem('hermes.desktop.workspace-cwd')
   $currentCwd.set('')
+  $activeGatewayProfile.set('default')
+  $activeSessionId.set(null)
+  $sessionStates.set({})
+  clearAllPrompts()
 })
 
 // Let pending microtasks (awaits) AND the queued 0ms socket open/error fire.
@@ -338,6 +361,41 @@ describe('useGatewayBoot remote reconnect loop (real hook, fake socket)', () => 
     expect($desktopBoot.get().error).toBeNull()
     expect($desktopBoot.get().visible).toBe(false)
     expect($desktopBoot.get().phase).toBe('renderer.ready')
+  })
+
+  it('routes a real primary socket event through the adopted non-default profile to transcript and prompts', async () => {
+    const desktop = fakeDesktop()
+    desktop.profile.get = vi.fn(async () => ({ profile: 'work' }))
+    ;(window as { hermesDesktop?: unknown }).hermesDesktop = desktop
+    $activeSessionId.set('runtime-work')
+
+    render(
+      <Harness
+        handleGatewayEvent={event => {
+          const profile = String(event.profile)
+          const sessionId = String(event.session_id)
+          const state = createClientSessionState('stored-work')
+          state.messages = [{ id: 'work-message', parts: [{ type: 'text', text: 'from work' }], role: 'assistant' }]
+          publishSessionState(sessionId, state, profile)
+          setSecretRequest({
+            envVar: 'WORK_TOKEN',
+            profile,
+            prompt: 'Work token',
+            requestId: 'secret-work',
+            sessionId
+          })
+        }}
+      />
+    )
+    await flushAsync()
+
+    expect($activeGatewayProfile.get()).toBe('work')
+    act(() => {
+      FakeWebSocket.instances[0].serverEvent({ session_id: 'runtime-work', type: 'secret.request' })
+    })
+
+    expect(PRIMARY_SESSION_VIEW.$messages.get()[0]?.id).toBe('work-message')
+    expect($secretRequest.get()?.requestId).toBe('secret-work')
   })
 
   it('seeds the configured default project dir pre-connect — no route-resume race (#71873)', async () => {

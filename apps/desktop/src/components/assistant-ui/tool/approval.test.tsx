@@ -3,11 +3,14 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import type { HermesGateway } from '@/hermes'
 import { $gateway } from '@/store/gateway'
+import { notifyPromptResponseError } from '@/store/notifications'
 import { $approvalRequest, clearAllPrompts, setApprovalRequest } from '@/store/prompts'
 import { $activeSessionId } from '@/store/session'
 
 import { PendingApprovalFallback, PendingToolApproval } from './approval'
 import type { ToolPart } from './fallback-model'
+
+vi.mock('@/store/notifications', () => ({ notifyError: vi.fn(), notifyPromptResponseError: vi.fn() }))
 
 // Radix's DropdownMenu touches pointer-capture + scrollIntoView, which jsdom
 // doesn't implement; stub them so the menu can open in tests.
@@ -111,6 +114,26 @@ describe('PendingToolApproval', () => {
     await waitFor(() => {
       expect(request).toHaveBeenCalledWith('approval.respond', { choice: 'deny', session_id: 'sess-1' })
     })
+  })
+
+  it('redacts response failures according to the authoritative approval request profile', async () => {
+    $gateway.set({
+      request: vi.fn().mockRejectedValue(new Error('/srv/private/approval.db token=secret'))
+    } as unknown as HermesGateway)
+    $activeSessionId.set('sess-1')
+    setApprovalRequest({
+      command: 'rm -rf /tmp/x',
+      description: 'dangerous command',
+      profile: 'default',
+      sessionId: 'sess-1'
+    })
+    render(<PendingToolApproval part={part('terminal')} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Run/ }))
+
+    await waitFor(() =>
+      expect(notifyPromptResponseError).toHaveBeenCalledWith(expect.any(Error), expect.any(String), 'default')
+    )
   })
 
   it('offers "Always allow" in the options menu by default', async () => {

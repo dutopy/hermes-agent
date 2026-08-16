@@ -28,8 +28,9 @@ import { fmtDateTime } from '@/lib/time'
 import { useStoreSelector } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
 import { upsertDesktopActionTask } from '@/store/activity'
-import { $pinnedSessionIds, pinSession, unpinSession } from '@/store/layout'
-import { $sessions, sessionPinId } from '@/store/session'
+import { $pinnedSessionIds } from '@/store/layout'
+import { $sessions } from '@/store/session'
+import { sessionPinKeyForOwner, toggleSessionPinKey } from '@/store/session-pins'
 
 import { useRefreshHotkey } from '../hooks/use-refresh-hotkey'
 import { useRouteEnumParam } from '../hooks/use-route-enum-param'
@@ -363,7 +364,7 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
               ) : (
                 <ul>
                   {filteredSessions.map(session => {
-                    const pinId = sessionPinId(session)
+                    const pinId = sessionPinKeyForOwner(session.id, session.profile, [session])
                     const pinned = pinnedSessionIds.includes(pinId)
 
                     return (
@@ -382,7 +383,7 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
                         </button>
                         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                           <RowIconButton
-                            onClick={() => (pinned ? unpinSession(pinId) : pinSession(pinId))}
+                            onClick={() => toggleSessionPinKey(pinId)}
                             title={pinned ? cc.unpinSession : cc.pinSession}
                           >
                             {pinned ? <BookmarkFilled className="size-3.5" /> : <Bookmark className="size-3.5" />}

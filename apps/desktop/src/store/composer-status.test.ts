@@ -1,6 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { $backgroundStatusBySession, dismissBackgroundProcess, reconcileBackgroundProcesses } from './composer-status'
+import {
+  $backgroundStatusBySession,
+  dismissBackgroundProcess,
+  reconcileBackgroundProcesses,
+  refreshBackgroundProcesses,
+  resetSessionBackground,
+  stopBackgroundProcess
+} from './composer-status'
+import { requestGatewayForProfile } from './gateway'
+import { dispatchNativeNotification } from './native-notifications'
+import { $notifications, clearNotifications } from './notifications'
+import { $activeGatewayProfile } from './profile'
+import { setActiveSessionId } from './session'
+import { sessionRuntimeStateKey } from './session-states'
+
+vi.mock('./gateway', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  requestGatewayForProfile: vi.fn()
+}))
+
+vi.mock('./native-notifications', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  dispatchNativeNotification: vi.fn()
+}))
 
 const SID = 'sess-1'
 
@@ -149,5 +172,74 @@ describe('reconcileBackgroundProcesses', () => {
     vi.advanceTimersByTime(5_000)
 
     expect(itemsOf('sess-arm')).toEqual([])
+  })
+})
+
+describe('profile-owned background process actions', () => {
+  const profile = 'profile-b'
+  const key = sessionRuntimeStateKey(profile, SID)
+
+  beforeEach(() => {
+    $backgroundStatusBySession.set({})
+    $activeGatewayProfile.set('profile-a')
+    clearNotifications()
+    vi.mocked(dispatchNativeNotification).mockReset()
+    vi.mocked(requestGatewayForProfile).mockReset()
+  })
+
+  it('keeps the explicit owner on completion when another profile shares the active runtime id', () => {
+    setActiveSessionId(SID)
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+    reconcileBackgroundProcesses(SID, [running('b')], profile)
+    reconcileBackgroundProcesses(SID, [exited('b')], profile)
+
+    expect(dispatchNativeNotification).toHaveBeenCalledOnce()
+    expect(dispatchNativeNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'backgroundDone', profile, sessionId: SID })
+    )
+  })
+
+  it('refreshes through the reconnectable owner requester', async () => {
+    vi.mocked(requestGatewayForProfile).mockResolvedValueOnce({ processes: [running('b')] })
+
+    await refreshBackgroundProcesses(SID, profile)
+
+    expect(requestGatewayForProfile).toHaveBeenCalledWith(profile, 'process.list', { session_id: SID })
+    expect($backgroundStatusBySession.get()[key]?.map(item => item.id)).toEqual(['b'])
+  })
+
+  it('keeps a running row and redacts owner errors when kill fails', async () => {
+    const secret = '/srv/private/process.log token=super-secret'
+    reconcileBackgroundProcesses(SID, [running('b')], profile)
+    vi.mocked(requestGatewayForProfile).mockRejectedValueOnce(new Error(secret))
+
+    await stopBackgroundProcess(SID, 'b', profile)
+
+    expect(requestGatewayForProfile).toHaveBeenCalledWith(profile, 'process.kill', {
+      process_id: 'b',
+      session_id: SID
+    })
+    expect($backgroundStatusBySession.get()[key]?.map(item => item.id)).toEqual(['b'])
+    expect(JSON.stringify($notifications.get())).not.toContain(secret)
+    expect($notifications.get()[0]).toMatchObject({
+      message: 'Could not stop the process',
+      title: 'Could not stop the process'
+    })
+  })
+
+  it('reset clears only rows whose owner kill succeeds', async () => {
+    reconcileBackgroundProcesses(SID, [running('fails'), running('dies'), exited('done')], profile)
+    vi.mocked(requestGatewayForProfile).mockImplementation(async (_profile, _method, params) => {
+      if (params?.process_id === 'fails') {
+        throw new Error('/private/reset token=secret')
+      }
+
+      return {}
+    })
+
+    await resetSessionBackground(SID, profile)
+
+    expect($backgroundStatusBySession.get()[key]?.map(item => item.id)).toEqual(['fails'])
+    expect(JSON.stringify($notifications.get())).not.toContain('/private/reset')
   })
 })

@@ -22,7 +22,13 @@ import { computed } from 'nanostores'
 import { stableRecord } from '@/lib/stable-array'
 
 import { $backgroundRunningSessionIds } from './composer-status'
-import { $sessions, $unreadFinishedSessionIds, lineageAliases } from './session'
+import {
+  $sessions,
+  $unreadFinishedSessionIds,
+  lineageAliases,
+  sessionDurableStateIdentity,
+  sessionDurableStateKey
+} from './session'
 import { $attentionSessionIds, $draftSessionIds, $stalledSessionIds, $workingSessionIds } from './session-states'
 
 export type SessionDotState = 'background' | 'draft' | 'idle' | 'needs-input' | 'stalled' | 'unread' | 'working'
@@ -71,9 +77,11 @@ export const $sessionDotStateById = computed(
     const next: Record<string, SessionDotState> = {}
 
     const claim = (ids: readonly string[], state: SessionDotState) => {
-      for (const id of ids) {
-        for (const alias of lineageAliases(id, sessions)) {
-          next[alias] = state
+      for (const key of ids) {
+        const { profile, storedSessionId } = sessionDurableStateIdentity(key)
+
+        for (const alias of lineageAliases(storedSessionId, sessions, profile)) {
+          next[sessionDurableStateKey(profile, alias)] = state
         }
       }
     }
@@ -93,10 +101,14 @@ export const $sessionDotStateById = computed(
     // authoritatively running, it has just gone quiet — so it only downgrades a
     // session already claimed as working. The hint outlives its turn by a tick
     // on some paths; without this it could invent a running session.
-    for (const id of stalled) {
-      for (const alias of lineageAliases(id, sessions)) {
-        if (next[alias] === 'working') {
-          next[alias] = 'stalled'
+    for (const key of stalled) {
+      const { profile, storedSessionId } = sessionDurableStateIdentity(key)
+
+      for (const alias of lineageAliases(storedSessionId, sessions, profile)) {
+        const aliasKey = sessionDurableStateKey(profile, alias)
+
+        if (next[aliasKey] === 'working') {
+          next[aliasKey] = 'stalled'
         }
       }
     }

@@ -1,0 +1,88 @@
+{
+  "layout": {
+    "compact": 900,
+    "wide": 1280,
+    "inspectorWidth": 340
+  },
+  "query": {
+    "listRefetchMs": 30000,
+    "projectsRefetchMs": 30000,
+    "snapshotRefetchMs": 60000
+  },
+  "states": {
+    "tone": {
+      "ready": "good",
+      "in_progress": "warn",
+      "blocked": "bad",
+      "completed": "muted",
+      "cancelled": "muted"
+    },
+    "order": {
+      "blocked": 0,
+      "in_progress": 1,
+      "ready": 2
+    },
+    "label": {
+      "ready": "Ready",
+      "in_progress": "In progress",
+      "blocked": "Blocked",
+      "completed": "Completed",
+      "planned": "Planned",
+      "archived": "Archived"
+    }
+  },
+  "nextActionLabel": {
+    "unblock": "Unblock",
+    "claim": "Claim",
+    "advance": "Advance",
+    "assign": "Assign",
+    "wait-deps": "Wait"
+  },
+  "relation": {
+    "label": {
+      "depends_on": "depends on",
+      "blocks": "blocks"
+    },
+    "icon": {
+      "depends_on": "arrow-right",
+      "blocks": "debug-disconnect"
+    }
+  },
+  "tabs": [
+    { "id": "thread", "label": "Thread", "codicon": "list-ordered" },
+    { "id": "map", "label": "Map", "codicon": "graph" },
+    { "id": "plan", "label": "Plan", "codicon": "versions" },
+    { "id": "milestones", "label": "Milestones", "codicon": "milestone" },
+    { "id": "decisions", "label": "Decisions", "codicon": "checklist" },
+    { "id": "files", "label": "Files", "codicon": "files" }
+  ],
+  "codicons": [
+    "account",
+    "add",
+    "archive",
+    "arrow-down",
+    "arrow-right",
+    "arrow-up",
+    "check",
+    "checklist",
+    "chevron-right",
+    "close",
+    "debug-disconnect",
+    "debug-restart",
+    "edit",
+    "ellipsis",
+    "error",
+    "files",
+    "graph",
+    "hourglass",
+    "info",
+    "list-ordered",
+    "milestone",
+    "pass-filled",
+    "person",
+    "person-add",
+    "play",
+    "target",
+    "versions"
+  ]
+}

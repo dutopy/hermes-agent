@@ -2,8 +2,9 @@ import { atom } from 'nanostores'
 
 import { persistString, storedString } from '@/lib/storage'
 
-import { $gateway } from './gateway'
+import { $gateway, requestGatewayForProfile } from './gateway'
 import { withinNativeNotifyBaseline } from './notify-baseline'
+import { $activeGatewayProfile, normalizeProfileKey } from './profile'
 import { clearApprovalRequest } from './prompts'
 import { $activeSessionId } from './session'
 
@@ -125,7 +126,12 @@ function isBackgrounded(): boolean {
   return typeof document.hasFocus === 'function' && !document.hasFocus()
 }
 
-function shouldFire(kind: NativeNotificationKind, sessionId?: null | string, global = false): boolean {
+function shouldFire(
+  kind: NativeNotificationKind,
+  sessionId?: null | string,
+  global = false,
+  profile?: null | string
+): boolean {
   // Global notifications aren't tied to a chat session (e.g. pet generation,
   // which runs from the command center with no active conversation). They fire
   // whenever the user is away, with no session-match requirement — otherwise a
@@ -135,13 +141,15 @@ function shouldFire(kind: NativeNotificationKind, sessionId?: null | string, glo
   }
 
   // Attention kinds break through for an off-screen session even while focused.
+  const activeOwner = profile == null || normalizeProfileKey(profile) === normalizeProfileKey($activeGatewayProfile.get())
+
   if (ATTENTION_KINDS.has(kind)) {
-    return isBackgrounded() || (Boolean(sessionId) && sessionId !== $activeSessionId.get())
+    return isBackgrounded() || (Boolean(sessionId) && (!activeOwner || sessionId !== $activeSessionId.get()))
   }
 
   // Completion kinds: only the active session, only while away — so a busy
   // gateway (messaging, kanban, cron) can't spam a toast per background session.
-  return isBackgrounded() && Boolean(sessionId) && sessionId === $activeSessionId.get()
+  return isBackgrounded() && activeOwner && Boolean(sessionId) && sessionId === $activeSessionId.get()
 }
 
 export interface NativeNotificationAction {
@@ -154,6 +162,7 @@ export interface NativeNotificationInput {
   title: string
   body?: string
   sessionId?: null | string
+  profile?: null | string
   /**
    * Not tied to a chat session (e.g. pet generation). Fires whenever the user
    * is away, bypassing the session-match gate that completion kinds normally
@@ -181,11 +190,16 @@ export function dispatchNativeNotification(input: NativeNotificationInput): void
     return
   }
 
-  if (!shouldFire(input.kind, input.sessionId, input.global)) {
+  if (!shouldFire(input.kind, input.sessionId, input.global, input.profile)) {
     return
   }
 
-  if (throttled(`${input.kind}:${input.sessionId ?? input.tag ?? (input.global ? 'global' : '')}`, Date.now())) {
+  if (
+    throttled(
+      `${input.kind}:${normalizeProfileKey(input.profile)}:${input.sessionId ?? input.tag ?? (input.global ? 'global' : '')}`,
+      Date.now()
+    )
+  ) {
     return
   }
 
@@ -193,6 +207,7 @@ export function dispatchNativeNotification(input: NativeNotificationInput): void
     actions: input.actions,
     body: input.body,
     kind: input.kind,
+    profile: input.profile ?? undefined,
     sessionId: input.sessionId ?? undefined,
     silent: input.silent,
     tag: input.tag,
@@ -218,23 +233,35 @@ export function dispatchPluginNativeNotification(pluginId: string, input: Plugin
 }
 
 // Resolve a pending approval from a notification button, mirroring the in-app
-// Run/Reject bar. Keyed by session id — a background approval has no local guard.
-export async function respondToApprovalAction(sessionId: null | string, actionId: string): Promise<void> {
+// Run/Reject bar. The Electron callback returns the owner profile carried by
+// that exact notification; runtime ids are not globally unique across profiles.
+export async function respondToApprovalAction(
+  sessionId: null | string,
+  actionId: string,
+  profile?: null | string
+): Promise<void> {
   const choice = actionId === 'approve' ? 'once' : actionId === 'reject' ? 'deny' : null
 
   if (!choice) {
     return
   }
 
-  const gateway = $gateway.get()
-
-  if (!gateway) {
-    return
-  }
-
   try {
-    await gateway.request('approval.respond', { choice, session_id: sessionId ?? undefined })
-    clearApprovalRequest(sessionId)
+    const params = { choice, session_id: sessionId ?? undefined }
+
+    if (profile == null) {
+      const gateway = $gateway.get()
+
+      if (!gateway) {
+        return
+      }
+
+      await gateway.request('approval.respond', params)
+    } else {
+      await requestGatewayForProfile(profile, 'approval.respond', params)
+    }
+
+    clearApprovalRequest(sessionId, undefined, profile)
   } catch {
     // Leave the prompt parked so the user can still resolve it in-app.
   }

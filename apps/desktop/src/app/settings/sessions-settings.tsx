@@ -17,7 +17,13 @@ import { triggerHaptic } from '@/lib/haptics'
 import { Archive, ArchiveOff, FolderOpen, Loader2, Trash2 } from '@/lib/icons'
 import { notify, notifyError } from '@/store/notifications'
 import { untombstoneSessions } from '@/store/projects'
-import { applyConfiguredDefaultProjectDir, ensureDefaultWorkspaceCwd, setSessions } from '@/store/session'
+import {
+  applyConfiguredDefaultProjectDir,
+  ensureDefaultWorkspaceCwd,
+  sessionDurableStateKey,
+  setSessions
+} from '@/store/session'
+import { discardSessionIdentityState, sessionTileDelegate } from '@/store/session-states'
 import type { HermesConfigRecord, SessionInfo } from '@/types/hermes'
 
 import { EmptyState, ListRow, SectionHeading, SettingsContent, SettingsSkeleton, ToggleRow } from './primitives'
@@ -26,6 +32,12 @@ import { useDeepLinkHighlight } from './use-deep-link-highlight'
 const DEFAULT_AUTO_ARCHIVE_DAYS = 3
 
 const ARCHIVED_FETCH_LIMIT = 200
+
+const archivedSessionKey = (session: Pick<SessionInfo, 'id' | 'profile'>) =>
+  sessionDurableStateKey(session.profile, session.id)
+
+const archivedSessionDomId = (session: Pick<SessionInfo, 'id' | 'profile'>) =>
+  `archived-session-${encodeURIComponent(archivedSessionKey(session))}`
 
 export function SessionsSettings() {
   const { t } = useI18n()
@@ -53,15 +65,19 @@ export function SessionsSettings() {
 
   const unarchive = useCallback(
     async (session: SessionInfo) => {
-      setBusyId(session.id)
+      const identity = archivedSessionKey(session)
+      setBusyId(identity)
 
       try {
         await setSessionArchived(session.id, false, session.profile)
-        setLocalSessions(prev => prev.filter(s => s.id !== session.id))
+        setLocalSessions(prev => prev.filter(candidate => archivedSessionKey(candidate) !== identity))
         // Surface it again in the sidebar without waiting for a full refresh, and
         // lift any optimistic eviction so the grouped tree shows it again too.
-        untombstoneSessions([session.id, session._lineage_root_id])
-        setSessions(prev => [{ ...session, archived: false }, ...prev.filter(s => s.id !== session.id)])
+        untombstoneSessions([session.id, session._lineage_root_id], session.profile)
+        setSessions(prev => [
+          { ...session, archived: false },
+          ...prev.filter(candidate => archivedSessionKey(candidate) !== identity)
+        ])
         triggerHaptic('selection')
         notify({ durationMs: 2_000, kind: 'success', message: s.restored })
       } catch (err) {
@@ -79,11 +95,22 @@ export function SessionsSettings() {
         return
       }
 
-      setBusyId(session.id)
+      const identity = archivedSessionKey(session)
+      setBusyId(identity)
 
       try {
         await deleteSession(session.id, session.profile)
-        setLocalSessions(prev => prev.filter(s => s.id !== session.id))
+        const ownerProfile = session.profile?.trim() || 'default'
+        const storedSessionIds = [
+          ...new Set([session.id, session._lineage_root_id].filter((id): id is string => Boolean(id)))
+        ]
+
+        for (const storedSessionId of storedSessionIds) {
+          discardSessionIdentityState(ownerProfile, storedSessionId)
+          sessionTileDelegate()?.discardSurface?.({ profile: ownerProfile, storedSessionId })
+        }
+
+        setLocalSessions(prev => prev.filter(candidate => archivedSessionKey(candidate) !== identity))
         triggerHaptic('warning')
       } catch (err) {
         notifyError(err, s.deleteFailed)
@@ -95,7 +122,11 @@ export function SessionsSettings() {
   )
 
   useDeepLinkHighlight({
-    elementId: id => `archived-session-${id}`,
+    elementId: id => {
+      const session = sessions.find(candidate => candidate.id === id)
+
+      return session ? archivedSessionDomId(session) : `archived-session-${encodeURIComponent(id)}`
+    },
     param: 'session',
     ready: id => !loading && sessions.some(session => session.id === id)
   })
@@ -125,10 +156,11 @@ export function SessionsSettings() {
         <div className="grid gap-1">
           {sessions.map(session => {
             const label = pathLeaf(session.cwd)
-            const busy = busyId === session.id
+            const identity = archivedSessionKey(session)
+            const busy = busyId === identity
 
             return (
-              <div className="scroll-mt-6 rounded-lg" id={`archived-session-${session.id}`} key={session.id}>
+              <div className="scroll-mt-6 rounded-lg" id={archivedSessionDomId(session)} key={identity}>
                 <ListRow
                   action={
                     <div className="flex items-center gap-1.5">

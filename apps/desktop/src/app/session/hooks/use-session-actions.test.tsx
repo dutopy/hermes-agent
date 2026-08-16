@@ -5,11 +5,29 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { $terminalTakeover, setTerminalTakeover } from '@/app/right-sidebar/store'
 import { noteActiveTreeGroup, revealTreePane } from '@/components/pane-shell/tree/store'
-import { getAllSessionMessages, getLatestSessionMessages, getSession, type SessionInfo } from '@/hermes'
+import {
+  deleteSession,
+  getAllSessionMessages,
+  getLatestSessionMessages,
+  getSession,
+  type SessionInfo,
+  setSessionArchived
+} from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { $compactingSessions, setSessionCompacting } from '@/store/compaction'
 import { clearSessionDraft, stashSessionDraft, takeSessionDraft } from '@/store/composer'
+import { $queuedPromptsBySession } from '@/store/composer-queue'
+import { requestGatewayForProfile } from '@/store/gateway'
+import { $goalsBySession, setSessionGoal } from '@/store/goals'
+import { $pinnedSessionIds } from '@/store/layout'
 import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile } from '@/store/profile'
-import { $projectScope, $projectTree, ALL_PROJECTS } from '@/store/projects'
+import {
+  $projectScope,
+  $projectTree,
+  $removedSessionIds,
+  $sessionMutationsInFlight,
+  ALL_PROJECTS
+} from '@/store/projects'
 import {
   $activeSessionId,
   $activeSessionStoredIdRotation,
@@ -22,6 +40,7 @@ import {
   $newChatWorkspaceTarget,
   $resumeFailedSessionId,
   $selectedStoredSessionId,
+  $sessions,
   setActiveSessionId,
   setActiveSessionStoredIdRotation,
   setCurrentCwd,
@@ -35,7 +54,20 @@ import {
   setSelectedStoredSessionId,
   setSessions
 } from '@/store/session'
-import { $sessionTiles } from '@/store/session-states'
+import {
+  $sessionStates,
+  $sessionTiles,
+  bindSessionSurfaceRuntime,
+  getRecentlySettledSessionIds,
+  publishSessionState,
+  reopenLastClosedTile,
+  retainSessionSurfaceReference,
+  sessionRuntimeStateKey,
+  sessionSurfaceReferenceCount
+} from '@/store/session-states'
+import { $todosBySession, setSessionTodos } from '@/store/todos'
+import { getToolDiff, recordToolDiff } from '@/store/tool-diffs'
+import { $draftingToolSessions, setSessionDraftingTool } from '@/store/tool-drafting'
 
 import { sessionRoute } from '../../routes'
 import type { ClientSessionState } from '../../types'
@@ -58,6 +90,11 @@ vi.mock('@/store/profile', async importOriginal => ({
   ensureGatewayProfile: vi.fn().mockResolvedValue(undefined)
 }))
 
+vi.mock('@/store/gateway', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  requestGatewayForProfile: vi.fn()
+}))
+
 vi.mock('@/components/pane-shell/tree/store', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   noteActiveTreeGroup: vi.fn(),
@@ -68,12 +105,14 @@ const RUNTIME_SESSION_ID = 'rt-new-001'
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
 
-  const promise = new Promise<T>(done => {
+  const promise = new Promise<T>((done, fail) => {
     resolve = done
+    reject = fail
   })
 
-  return { promise, resolve }
+  return { promise, reject, resolve }
 }
 
 type HarnessHandle = Pick<
@@ -605,7 +644,9 @@ function ResumeHarness({
   sessionStateByRuntimeIdRef
 }: {
   onStateUpdate?: (sessionId: string, state: ClientSessionState) => void
-  onReady: (resume: (storedSessionId: string, replaceRoute?: boolean) => Promise<unknown>) => void
+  onReady: (
+    resume: (storedSessionId: string, replaceRoute?: boolean, profile?: string) => Promise<unknown>
+  ) => void
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   runtimeIdByStoredSessionIdRef?: MutableRefObject<Map<string, string>>
   selectedStoredSessionId?: string | null
@@ -685,6 +726,39 @@ describe('resumeSession failure recovery', () => {
     // The window is no longer silently stranded: the failure latch is armed for
     // the stored session, which use-route-resume consumes to retry.
     expect($resumeFailedSessionId.get()).toBe('stored-1')
+  })
+
+  it('resumes and reads only the explicit B owner when A and B share a stored id', async () => {
+    $activeGatewayProfile.set('profile-a')
+    setSessions([
+      storedSession({ id: 'same', profile: 'profile-a', title: 'A private' }),
+      storedSession({ id: 'same', profile: 'profile-b', title: 'B private' })
+    ])
+    vi.mocked(getLatestSessionMessages).mockResolvedValue({ messages: [], session_id: 'same' } as never)
+    vi.mocked(requestGatewayForProfile).mockResolvedValue({
+      session_id: 'runtime-b',
+      session_key: 'same',
+      resumed: 'same',
+      messages: [],
+      info: {}
+    } as never)
+    vi.mocked(ensureGatewayProfile).mockClear()
+    const foregroundRequest = vi.fn()
+    let resume: ((storedSessionId: string, replaceRoute?: boolean, profile?: string) => Promise<unknown>) | null = null
+
+    render(<ResumeHarness onReady={ready => (resume = ready)} requestGateway={foregroundRequest} />)
+    await waitFor(() => expect(resume).not.toBeNull())
+    await resume!('same', true, 'profile-b')
+
+    expect(requestGatewayForProfile).toHaveBeenCalledWith(
+      'profile-b',
+      'session.resume',
+      expect.objectContaining({ session_id: 'same', profile: 'profile-b' })
+    )
+    expect(getLatestSessionMessages).toHaveBeenCalledWith('same', 'profile-b')
+    expect(foregroundRequest).not.toHaveBeenCalled()
+    expect(ensureGatewayProfile).not.toHaveBeenCalledWith('profile-b')
+    expect($activeGatewayProfile.get()).toBe('profile-a')
   })
 
   it('does NOT arm the failure latch when the resume RPC fails but the REST fallback paints history', async () => {
@@ -1298,7 +1372,7 @@ describe('resumeSession drops a redundant tile when the session loads into main'
 
   it('closes the tile so the session is not open in both main and its own tab', async () => {
     // The session is already an open tile (e.g. persisted across a restart)...
-    $sessionTiles.set([{ storedSessionId: 'stored-1' }])
+    $sessionTiles.set([{ profile: 'default', storedSessionId: 'stored-1' }])
 
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       if (method === 'session.resume') {
@@ -1323,7 +1397,7 @@ describe('resumeSession drops a redundant tile when the session loads into main'
   })
 
   it('leaves OTHER sessions tiles untouched', async () => {
-    $sessionTiles.set([{ storedSessionId: 'stored-1' }, { storedSessionId: 'stored-2' }])
+    $sessionTiles.set([{ profile: 'default', storedSessionId: 'stored-1' }, { profile: 'default', storedSessionId: 'stored-2' }])
 
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       if (method === 'session.resume') {
@@ -1709,5 +1783,247 @@ describe('selectSidebarItem', () => {
     expect(navigate).toHaveBeenCalledWith('/skills', undefined)
     expect(noteActiveTreeGroup).toHaveBeenCalledWith(null)
     expect(revealTreePane).toHaveBeenCalledWith('workspace')
+  })
+})
+
+function MutationHarness({
+  cacheRefs,
+  onReady,
+  requestGateway = vi.fn(async () => ({}) as never)
+}: {
+  cacheRefs?: {
+    runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>>
+    sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>>
+  }
+  onReady: (actions: Pick<ReturnType<typeof useSessionActions>, 'archiveSession' | 'removeSession'>) => void
+  requestGateway?: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
+}) {
+  const ref = <T,>(value: T): MutableRefObject<T> => ({ current: value })
+
+  const actions = useSessionActions({
+    activeSessionId: null,
+    activeSessionIdRef: ref<string | null>(null),
+    busyRef: ref(false),
+    creatingSessionRef: ref(false),
+    ensureSessionState: () => ({}) as ClientSessionState,
+    getRouteToken: () => 'token',
+    getRoutedStoredSessionId: () => null,
+    navigate: vi.fn() as never,
+    requestGateway,
+    resetViewSync: vi.fn(),
+    runtimeIdByStoredSessionIdRef: cacheRefs?.runtimeIdByStoredSessionIdRef ?? ref(new Map<string, string>()),
+    selectedStoredSessionId: null,
+    selectedStoredSessionIdRef: ref<string | null>(null),
+    sessionStateByRuntimeIdRef: cacheRefs?.sessionStateByRuntimeIdRef ?? ref(new Map<string, ClientSessionState>()),
+    syncSessionStateToView: vi.fn(),
+    updateSessionState: () => ({}) as ClientSessionState
+  })
+
+  useEffect(() => {
+    onReady(actions)
+  }, [actions, onReady])
+
+  return null
+}
+
+describe('profile-qualified session mutation rollback', () => {
+  afterEach(() => {
+    cleanup()
+    setSessions([])
+    $sessionStates.set({})
+    $sessionTiles.set([])
+    $queuedPromptsBySession.set({})
+    $compactingSessions.set({})
+    $goalsBySession.set({})
+    $pinnedSessionIds.set([])
+    $todosBySession.set({})
+    $draftingToolSessions.set({})
+    $removedSessionIds.set(new Set())
+    $sessionMutationsInFlight.set(new Map())
+    vi.mocked(deleteSession).mockReset()
+    vi.mocked(setSessionArchived).mockReset()
+    vi.restoreAllMocks()
+  })
+
+  const collisionRows = () => [
+    storedSession({ id: 'same', profile: 'profile-a', title: 'A data', last_active: 30 }),
+    storedSession({ id: 'other', profile: 'profile-a', title: 'middle', last_active: 20 }),
+    storedSession({ id: 'same', profile: 'profile-b', title: 'B data', last_active: 10 })
+  ]
+
+  async function mutations(cacheRefs?: {
+    runtimeIdByStoredSessionIdRef: MutableRefObject<Map<string, string>>
+    sessionStateByRuntimeIdRef: MutableRefObject<Map<string, ClientSessionState>>
+  }) {
+    let actions: Pick<ReturnType<typeof useSessionActions>, 'archiveSession' | 'removeSession'> | null = null
+    render(<MutationHarness cacheRefs={cacheRefs} onReady={ready => (actions = ready)} />)
+    await waitFor(() => expect(actions).not.toBeNull())
+
+    return actions!
+  }
+
+  it('rolls back a failed profile B archive without replacing profile A or changing order', async () => {
+    const original = collisionRows()
+    const pending = deferred<{ ok: boolean }>()
+    setSessions(original)
+    vi.mocked(setSessionArchived).mockReturnValue(pending.promise)
+    const actions = await mutations()
+
+    let result!: Promise<void>
+    act(() => {
+      result = actions.archiveSession('same', 'profile-b')
+    })
+
+    expect($sessions.get()).toEqual([original[0], original[1]])
+    pending.reject(new Error('archive failed'))
+    await act(async () => result)
+
+    expect($sessions.get()).toEqual(original)
+    expect(setSessionArchived).toHaveBeenCalledWith('same', true, 'profile-b')
+  })
+
+  it('archives only profile B on success when profile A has the same stored id', async () => {
+    const original = collisionRows()
+    original[2] = { ...original[2], _lineage_root_id: 'root-b' }
+    const pending = deferred<{ ok: boolean }>()
+    setSessions(original)
+    vi.mocked(setSessionArchived).mockReturnValue(pending.promise)
+    const actions = await mutations()
+
+    const result = actions.archiveSession('same', 'profile-b')
+    expect($sessions.get()).toEqual([original[0], original[1]])
+    expect($removedSessionIds.get()).toEqual(new Set(['profile-b\u0000same', 'profile-b\u0000root-b']))
+    expect($sessionMutationsInFlight.get()).toEqual(
+      new Map([
+        ['profile-b\u0000same', 1],
+        ['profile-b\u0000root-b', 1]
+      ])
+    )
+    pending.resolve({ ok: true })
+    await act(async () => result)
+
+    expect($sessions.get()).toEqual([original[0], original[1]])
+    expect($removedSessionIds.get()).toEqual(new Set(['profile-b\u0000same', 'profile-b\u0000root-b']))
+    expect($sessionMutationsInFlight.get()).toEqual(new Map())
+    expect(setSessionArchived).toHaveBeenCalledWith('same', true, 'profile-b')
+  })
+
+  const seedCollisionState = () => {
+    const aState: ClientSessionState = { ...createClientSessionState('same'), busy: true }
+    const bState: ClientSessionState = { ...createClientSessionState('same'), busy: false }
+    const bRuntimeKey = sessionRuntimeStateKey('profile-b', 'same')
+    const bDurableKey = 'profile-b\u0000same'
+    const cacheRefs = {
+      runtimeIdByStoredSessionIdRef: {
+        current: new Map<string, string>([
+          ['same', 'same'],
+          [bDurableKey, 'same']
+        ])
+      },
+      sessionStateByRuntimeIdRef: {
+        current: new Map<string, ClientSessionState>([
+          ['same', aState],
+          [bRuntimeKey, bState]
+        ])
+      }
+    }
+
+    $sessionStates.set({ same: aState })
+    $sessionTiles.set([{ profile: 'profile-b', runtimeId: 'same', storedSessionId: 'same' }])
+    retainSessionSurfaceReference('profile-b', 'same')
+    bindSessionSurfaceRuntime('profile-b', 'same', 'same')
+    publishSessionState('same', { ...bState, busy: true }, 'profile-b')
+    publishSessionState('same', bState, 'profile-b')
+    $queuedPromptsBySession.set({
+      same: [{ attachments: [], id: 'a', queuedAt: 1, text: 'A' }],
+      [bDurableKey]: [{ attachments: [], id: 'b', queuedAt: 1, text: 'B' }],
+      [bRuntimeKey]: [{ attachments: [], id: 'br', queuedAt: 1, text: 'BR' }]
+    })
+    $pinnedSessionIds.set(['same', bDurableKey])
+    setSessionGoal('same', { status: 'active', title: 'A', updatedAt: 1 })
+    setSessionGoal('same', { status: 'active', title: 'B', updatedAt: 1 }, 'profile-b')
+    setSessionTodos('same', [{ content: 'A', id: 'a', status: 'pending' }])
+    setSessionTodos('same', [{ content: 'B', id: 'b', status: 'pending' }], 'profile-b')
+    setSessionCompacting('same', true)
+    setSessionCompacting('same', true, 'profile-b')
+    setSessionDraftingTool('same', 'A')
+    setSessionDraftingTool('same', 'B', 'profile-b')
+    recordToolDiff('tool', 'A')
+    recordToolDiff('tool', 'B', { profile: 'profile-b', runtimeId: 'same' })
+
+    return { aState, bDurableKey, bRuntimeKey, cacheRefs }
+  }
+
+  const expectOnlyBCollisionStateDiscarded = ({
+    aState,
+    bDurableKey,
+    bRuntimeKey,
+    cacheRefs
+  }: ReturnType<typeof seedCollisionState>) => {
+    expect($sessionStates.get()).toEqual({ same: aState })
+    expect(cacheRefs.runtimeIdByStoredSessionIdRef.current).toEqual(new Map([['same', 'same']]))
+    expect(cacheRefs.sessionStateByRuntimeIdRef.current).toEqual(new Map([['same', aState]]))
+    expect($queuedPromptsBySession.get()).toEqual({ same: expect.any(Array) })
+    expect($pinnedSessionIds.get()).toEqual(['same'])
+    expect($goalsBySession.get()).toHaveProperty('same')
+    expect($goalsBySession.get()).not.toHaveProperty(bRuntimeKey)
+    expect($todosBySession.get()).toHaveProperty('same')
+    expect($todosBySession.get()).not.toHaveProperty(bRuntimeKey)
+    expect($compactingSessions.get()).toEqual({ same: true })
+    expect($draftingToolSessions.get()).toHaveProperty('same')
+    expect($draftingToolSessions.get()).not.toHaveProperty(bRuntimeKey)
+    expect(getToolDiff('tool')).toBe('A')
+    expect(getToolDiff('tool', { profile: 'profile-b', runtimeId: 'same' })).toBe('')
+    expect(getRecentlySettledSessionIds()).not.toContain(bDurableKey)
+    expect(sessionSurfaceReferenceCount('profile-b', 'same')).toBe(0)
+    expect($sessionTiles.get()).toEqual([])
+    reopenLastClosedTile()
+    expect($sessionTiles.get()).not.toContainEqual(expect.objectContaining({ profile: 'profile-b', storedSessionId: 'same' }))
+  }
+
+  it('discards only profile B state after archive succeeds', async () => {
+    const original = collisionRows()
+    setSessions(original)
+    vi.mocked(setSessionArchived).mockResolvedValue({ ok: true })
+    const seeded = seedCollisionState()
+    const actions = await mutations(seeded.cacheRefs)
+
+    await act(async () => actions.archiveSession('same', 'profile-b'))
+
+    expect($sessions.get()).toEqual([original[0], original[1]])
+    expectOnlyBCollisionStateDiscarded(seeded)
+  })
+
+  it('discards only profile B state after delete succeeds', async () => {
+    const original = collisionRows()
+    setSessions(original)
+    vi.mocked(deleteSession).mockResolvedValue({ ok: true })
+    const seeded = seedCollisionState()
+    const actions = await mutations(seeded.cacheRefs)
+
+    await act(async () => actions.removeSession('same', 'profile-b'))
+
+    expect($sessions.get()).toEqual([original[0], original[1]])
+    expectOnlyBCollisionStateDiscarded(seeded)
+  })
+
+  it('rolls back a failed profile B delete without duplicating or moving either homonym', async () => {
+    const original = collisionRows()
+    const pending = deferred<{ ok: boolean }>()
+    setSessions(original)
+    vi.mocked(deleteSession).mockReturnValue(pending.promise)
+    const actions = await mutations()
+
+    let result!: Promise<void>
+    act(() => {
+      result = actions.removeSession('same', 'profile-b')
+    })
+
+    expect($sessions.get()).toEqual([original[0], original[1]])
+    pending.reject(new Error('delete failed'))
+    await act(async () => result)
+
+    expect($sessions.get()).toEqual(original)
+    expect(deleteSession).toHaveBeenCalledWith('same', 'profile-b')
   })
 })

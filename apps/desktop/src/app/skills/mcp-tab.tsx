@@ -406,12 +406,13 @@ export function McpTab({ gateway }: { gateway: HermesGateway | null }) {
   // install from. Both share one cached catalog fetch (also feeds description
   // enrichment below), so switching between them never re-requests.
   const [leftView, setLeftView] = useState<'catalog' | 'servers'>('servers')
+  const catalogProfile = normalizeProfileKey(useStore($activeGatewayProfile))
 
   // Key by active profile — installed/enabled badges are per-profile, so sharing
   // one cache across profiles would flash the previous profile's state on switch.
   const catalogQuery = useQuery({
-    queryKey: [...MCP_CATALOG_KEY, normalizeProfileKey(useStore($activeGatewayProfile))],
-    queryFn: getMcpCatalog,
+    queryKey: [...MCP_CATALOG_KEY, catalogProfile],
+    queryFn: () => getMcpCatalog(catalogProfile),
     staleTime: 5 * 60_000
   })
 

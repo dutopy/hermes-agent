@@ -1,6 +1,7 @@
 import { atom } from 'nanostores'
 
-import { $gateway } from './gateway'
+import { $gateway, requestGatewayForProfile } from './gateway'
+import { sessionRuntimeStateKey } from './session-states'
 
 export type GoalStatus = 'active' | 'done' | 'paused' | 'waiting'
 
@@ -16,44 +17,46 @@ export const $goalsBySession = atom<Record<string, SessionGoal>>({})
 const DONE_LINGER_MS = 8_000
 const clearTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-function cancelScheduledClear(sid: string) {
-  const timer = clearTimers.get(sid)
+function cancelScheduledClear(key: string) {
+  const timer = clearTimers.get(key)
 
   if (timer !== undefined) {
     clearTimeout(timer)
-    clearTimers.delete(sid)
+    clearTimers.delete(key)
   }
 }
 
-export function setSessionGoal(sid: string, goal: SessionGoal) {
+export function setSessionGoal(sid: string, goal: SessionGoal, profile?: null | string) {
   if (!sid) {
     return
   }
 
-  cancelScheduledClear(sid)
-  $goalsBySession.set({ ...$goalsBySession.get(), [sid]: goal })
+  const key = sessionRuntimeStateKey(profile, sid)
+  cancelScheduledClear(key)
+  $goalsBySession.set({ ...$goalsBySession.get(), [key]: goal })
 
   if (goal.status === 'done') {
     clearTimers.set(
-      sid,
+      key,
       setTimeout(() => {
-        clearTimers.delete(sid)
-        clearSessionGoal(sid)
+        clearTimers.delete(key)
+        clearSessionGoal(sid, profile)
       }, DONE_LINGER_MS)
     )
   }
 }
 
-export function clearSessionGoal(sid: string) {
-  cancelScheduledClear(sid)
+export function clearSessionGoal(sid: string, profile?: null | string) {
+  const key = sessionRuntimeStateKey(profile, sid)
+  cancelScheduledClear(key)
 
   const map = $goalsBySession.get()
 
-  if (!(sid in map)) {
+  if (!(key in map)) {
     return
   }
 
-  const { [sid]: _drop, ...rest } = map
+  const { [key]: _drop, ...rest } = map
   $goalsBySession.set(rest)
 }
 
@@ -147,30 +150,34 @@ function nextGoalFromText(text: string, previous?: SessionGoal): SessionGoal | n
   return undefined
 }
 
-export function applyGoalStatusText(sid: string, text: string) {
+export function applyGoalStatusText(sid: string, text: string, profile?: null | string) {
   if (!sid) {
     return
   }
 
-  const next = nextGoalFromText(text, $goalsBySession.get()[sid])
+  const key = sessionRuntimeStateKey(profile, sid)
+  const next = nextGoalFromText(text, $goalsBySession.get()[key])
 
   if (next === null) {
-    clearSessionGoal(sid)
+    clearSessionGoal(sid, profile)
   } else if (next) {
-    setSessionGoal(sid, next)
+    setSessionGoal(sid, next, profile)
   }
 }
 
-export async function refreshSessionGoal(sid: string): Promise<void> {
-  const gateway = $gateway.get()
+export async function refreshSessionGoal(sid: string, profile?: null | string): Promise<void> {
+  const gateway = profile == null ? $gateway.get() : null
 
-  if (!sid || !gateway) {
+  if (!sid || (profile == null && !gateway)) {
     return
   }
 
   try {
-    const result = await gateway.request<{ output?: string }>('slash.exec', { command: 'goal status', session_id: sid })
-    applyGoalStatusText(sid, result?.output ?? '')
+    const params = { command: 'goal status', session_id: sid }
+    const result = profile
+      ? await requestGatewayForProfile<{ output?: string }>(profile, 'slash.exec', params)
+      : await gateway!.request<{ output?: string }>('slash.exec', params)
+    applyGoalStatusText(sid, result?.output ?? '', profile)
   } catch {
     // Best-effort: older gateways or detached sessions simply won't hydrate it.
   }

@@ -29,7 +29,8 @@ import {
   refreshWorktrees,
   resolveNewSessionCwd,
   scanAndRecordRepos,
-  tombstoneSessions
+  tombstoneSessions,
+  untombstoneSessions
 } from './projects'
 
 vi.mock('@/i18n', () => ({
@@ -523,7 +524,7 @@ describe('tombstone pruning', () => {
 
   beforeEach(() => {
     $removedSessionIds.set(new Set())
-    $sessionMutationsInFlight.set(new Set())
+    $sessionMutationsInFlight.set(new Map())
   })
 
   it('keeps an in-flight delete tombstone even when the backend snapshot omits it', async () => {
@@ -551,5 +552,45 @@ describe('tombstone pruning', () => {
     await refreshProjectTree()
 
     expect($removedSessionIds.get().has('sess-1')).toBe(false)
+  })
+
+  it('does not prune another profile tombstone from a single-profile refresh', async () => {
+    tombstoneSessions(['same'], 'profile-b')
+    $activeGatewayProfile.set('profile-a')
+    openGatewayReturning([])
+
+    await refreshProjectTree()
+
+    expect($removedSessionIds.get()).toEqual(new Set(['profile-b\u0000same']))
+  })
+
+  it('qualifies explicit profiles while preserving omitted-profile legacy identities', () => {
+    tombstoneSessions(['same'], 'profile-b')
+    tombstoneSessions(['legacy'])
+
+    expect($removedSessionIds.get()).toEqual(new Set(['profile-b\u0000same', 'legacy']))
+    untombstoneSessions(['same'], 'profile-a')
+    expect($removedSessionIds.get()).toEqual(new Set(['profile-b\u0000same', 'legacy']))
+    untombstoneSessions(['same'], 'profile-b')
+    expect($removedSessionIds.get()).toEqual(new Set(['legacy']))
+  })
+
+  it('refcounts concurrent profile-qualified mutations independently', () => {
+    beginSessionMutation(['same'], 'profile-a')
+    beginSessionMutation(['same'], 'profile-b')
+    beginSessionMutation(['same'], 'profile-b')
+
+    expect($sessionMutationsInFlight.get()).toEqual(
+      new Map([
+        ['profile-a\u0000same', 1],
+        ['profile-b\u0000same', 2]
+      ])
+    )
+    endSessionMutation(['same'], 'profile-a')
+    expect($sessionMutationsInFlight.get()).toEqual(new Map([['profile-b\u0000same', 2]]))
+    endSessionMutation(['same'], 'profile-b')
+    expect($sessionMutationsInFlight.get()).toEqual(new Map([['profile-b\u0000same', 1]]))
+    endSessionMutation(['same'], 'profile-b')
+    expect($sessionMutationsInFlight.get()).toEqual(new Map())
   })
 })

@@ -38,7 +38,12 @@ import {
   setCurrentCwd,
   setSessionsLoading
 } from '@/store/session'
-import { $attentionSessionIds, $workingSessionIds, resetTileRuntimeBindings } from '@/store/session-states'
+import {
+  $attentionSessionIds,
+  $sessionSurfaceProfiles,
+  $workingSessionIds,
+  resetTileRuntimeBindings
+} from '@/store/session-states'
 import { windowProfileOverride } from '@/store/windows'
 import type { RpcEvent } from '@/types/hermes'
 
@@ -262,17 +267,21 @@ export function useGatewayBoot({
     // session id against the wrong backend — the HUD then falls back to the
     // default profile's last session (#82285). The override wins over the
     // stored preference; absent, behavior is unchanged.
+    let sourceProfile = normalizeProfileKey($activeGatewayProfile.get())
+
     async function adoptPrimaryProfile() {
       const override = windowProfileOverride()
 
       try {
         const profileKey = override ?? (await desktop.profile?.get?.())?.profile ?? ''
         const key = normalizeProfileKey(profileKey)
+        sourceProfile = key
         $activeGatewayProfile.set(key)
         setPrimaryGateway(gateway, key)
         void ensureGatewayForProfile(key)
       } catch {
-        $activeGatewayProfile.set(normalizeProfileKey(override))
+        sourceProfile = normalizeProfileKey(override)
+        $activeGatewayProfile.set(sourceProfile)
       }
     }
 
@@ -423,8 +432,6 @@ export function useGatewayBoot({
       }
     })
 
-    const sourceProfile = normalizeProfileKey($activeGatewayProfile.get())
-
     const offEvent = gateway.onEvent(event =>
       callbacksRef.current.handleGatewayEvent({ ...event, profile: sourceProfile })
     )
@@ -466,11 +473,16 @@ export function useGatewayBoot({
         }
       }
 
+      for (const profile of $sessionSurfaceProfiles.get()) {
+        keep.add(normalizeProfileKey(profile))
+      }
+
       pruneSecondaryGateways(keep)
     }
 
     const offWorking = $workingSessionIds.subscribe(() => recomputeKeptGateways())
     const offAttention = $attentionSessionIds.subscribe(() => recomputeKeptGateways())
+    const offSessionSurfaces = $sessionSurfaceProfiles.subscribe(() => recomputeKeptGateways())
     const offActiveProfile = $activeGatewayProfile.subscribe(() => recomputeKeptGateways())
 
     const offWindowState = desktop.onWindowStateChanged?.(payload => {
@@ -631,6 +643,7 @@ export function useGatewayBoot({
       clearInterval(keepaliveTimer)
       offWorking()
       offAttention()
+      offSessionSurfaces()
       offActiveProfile()
       window.removeEventListener('online', onOnline)
       document.removeEventListener('visibilitychange', onVisible)

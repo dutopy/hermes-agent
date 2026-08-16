@@ -2,19 +2,93 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
 import { findGroupOfPane, group, split } from '@/components/pane-shell/tree/model'
-import { $layoutTree } from '@/components/pane-shell/tree/store'
+import { $layoutTree, noteActiveTreeGroup } from '@/components/pane-shell/tree/store'
+import { createClientSessionState } from '@/lib/chat-runtime'
+import { $activeGatewayProfile } from '@/store/profile'
 import { $selectedStoredSessionId } from '@/store/session'
 import type { SessionTile } from '@/store/session-states'
 import {
+  $focusedSessionState,
+  $sessionStates,
+  $sessionTiles,
   blankDraftTile,
+  clearAllSessionStates,
   focusedSessionNeedsRoute,
+  getRecentlySettledSessionIds,
   markSelectionRestore,
   orderTilesByTree,
-  selectionHomesToWorkspace
+  parseSessionTilePaneId,
+  patchSessionTile,
+  publishSessionState,
+  selectionHomesToWorkspace,
+  sessionTilePaneId
 } from '@/store/session-states'
 
-const tile = (storedSessionId: string): SessionTile => ({ storedSessionId })
-const tilePane = (id: string) => `session-tile:${id}`
+const tile = (storedSessionId: string): SessionTile => ({ profile: 'default', storedSessionId })
+const tilePane = (id: string, profile = 'default') => sessionTilePaneId(id, profile)
+
+describe('profile-qualified tile pane identity', () => {
+  it('round-trips explicit profile and stored ids without colliding with the legacy pane id', () => {
+    const paneA = sessionTilePaneId('same:id', 'profile-a')
+    const paneB = sessionTilePaneId('same:id', 'profile-b')
+
+    expect(paneA).not.toBe(paneB)
+    expect(paneA).not.toBe(sessionTilePaneId('same:id'))
+    expect(parseSessionTilePaneId(paneA)).toEqual({ profile: 'profile-a', storedSessionId: 'same:id' })
+    expect(parseSessionTilePaneId(paneB)).toEqual({ profile: 'profile-b', storedSessionId: 'same:id' })
+    expect(parseSessionTilePaneId(sessionTilePaneId('same:id'))).toEqual({ profile: null, storedSessionId: 'same:id' })
+  })
+
+  it('patches only the explicitly owned tile when stored ids collide', () => {
+    const a = { profile: 'profile-a', storedSessionId: 'same' }
+    const b = { profile: 'profile-b', storedSessionId: 'same' }
+    $sessionTiles.set([a, b])
+
+    patchSessionTile('same', { runtimeId: 'runtime-b' }, 'profile-b')
+
+    expect($sessionTiles.get()).toEqual([a, { ...b, runtimeId: 'runtime-b' }])
+  })
+})
+
+describe('profile-qualified settle grace', () => {
+  beforeEach(() => clearAllSessionStates())
+  afterEach(() => clearAllSessionStates())
+
+  it("keeps A's settled grace when B with the same stored id goes busy", () => {
+    const working = { ...createClientSessionState('shared'), busy: true, storedSessionId: 'shared' }
+
+    publishSessionState('runtime-a', working, 'a')
+    publishSessionState('runtime-a', { ...working, busy: false }, 'a')
+    expect(getRecentlySettledSessionIds()).toEqual(['a\u0000shared'])
+
+    publishSessionState('runtime-b', working, 'b')
+    expect(getRecentlySettledSessionIds()).toEqual(['a\u0000shared'])
+  })
+})
+
+describe('focused session profile isolation', () => {
+  beforeEach(() => {
+    $activeGatewayProfile.set('b')
+    $selectedStoredSessionId.set('primary')
+    $sessionTiles.set([{ profile: 'b', runtimeId: 'shared-runtime', storedSessionId: 'b-tile' }])
+    $layoutTree.set(group(['workspace', tilePane('b-tile', 'b')], { active: tilePane('b-tile', 'b'), id: 'focused-b' }))
+    noteActiveTreeGroup('focused-b')
+  })
+
+  afterEach(() => {
+    $sessionStates.set({})
+    $sessionTiles.set([])
+    noteActiveTreeGroup(null)
+  })
+
+  it('does not expose naked legacy metadata to an explicitly profiled focused tile', () => {
+    const legacy = { ...createClientSessionState('legacy-a'), model: 'secret-a-model' }
+    $sessionStates.set({ 'shared-runtime': legacy })
+
+    expect($focusedSessionState.get()).toBeUndefined()
+    expect($sessionStates.get()['shared-runtime']).toBe(legacy)
+  })
+})
 
 describe('orderTilesByTree', () => {
   it('no-ops (null) without a tree or below two tiles', () => {
@@ -52,6 +126,23 @@ describe('selectionHomesToWorkspace', () => {
   it('skips homing when the selected id is already an open tile', () => {
     expect(selectionHomesToWorkspace('a', tiles)).toBe(false)
   })
+
+  it('homes an explicit profile A selection away from profile B tile with the same stored id', () => {
+    const collidingTiles = [{ profile: 'profile-b', storedSessionId: 'same' }]
+
+    expect(selectionHomesToWorkspace('same', collidingTiles, 'profile-a')).toBe(true)
+  })
+
+  it('allows the same-profile tile to remain and keeps explicit default distinct from legacy omission', () => {
+    const collidingTiles = [
+      { profile: 'profile-a', storedSessionId: 'same' },
+      { profile: 'other', storedSessionId: 'other' }
+    ]
+
+    expect(selectionHomesToWorkspace('same', collidingTiles, 'profile-a')).toBe(false)
+    expect(selectionHomesToWorkspace('other', collidingTiles, 'default')).toBe(true)
+    expect(selectionHomesToWorkspace('other', collidingTiles)).toBe(false)
+  })
 })
 
 describe('boot-restore selection homing (⌘R tab persistence)', () => {
@@ -68,6 +159,30 @@ describe('boot-restore selection homing (⌘R tab persistence)', () => {
     $selectedStoredSessionId.set('nav-1')
 
     expect(activePane()).toBe('workspace')
+  })
+
+  it('fronts workspace when active profile A selects the stored id owned by the active B tile', () => {
+    $activeGatewayProfile.set('profile-a')
+    $sessionTiles.set([{ profile: 'profile-b', storedSessionId: 'same' }])
+    $layoutTree.set(
+      group(['workspace', tilePane('same', 'profile-b')], { active: tilePane('same', 'profile-b'), id: 'main' })
+    )
+
+    $selectedStoredSessionId.set('same')
+
+    expect(activePane()).toBe('workspace')
+  })
+
+  it('leaves the active A tile fronted when A selects its matching stored id', () => {
+    $activeGatewayProfile.set('profile-a')
+    $sessionTiles.set([{ profile: 'profile-a', storedSessionId: 'same' }])
+    $layoutTree.set(
+      group(['workspace', tilePane('same', 'profile-a')], { active: tilePane('same', 'profile-a'), id: 'main' })
+    )
+
+    $selectedStoredSessionId.set('same')
+
+    expect(activePane()).toBe(tilePane('same', 'profile-a'))
   })
 
   it('markSelectionRestore skips homing exactly once, so the persisted active tab survives a reload', () => {
@@ -105,7 +220,7 @@ describe('focusedSessionNeedsRoute', () => {
 })
 
 describe('blankDraftTile', () => {
-  const bound = (storedSessionId: string, runtimeId: string): SessionTile => ({ runtimeId, storedSessionId })
+  const bound = (storedSessionId: string, runtimeId: string): SessionTile => ({ profile: 'default', runtimeId, storedSessionId })
 
   const state = (messages: number, busy = false) =>
     ({ busy, messages: Array.from({ length: messages }, (_, i) => ({ id: `m${i}` })) }) as ClientSessionState
@@ -122,6 +237,26 @@ describe('blankDraftTile', () => {
     const states = { 'run-a': state(0), 'run-b': state(0) }
 
     expect(blankDraftTile(tiles, states)).toEqual(tiles[1])
+  })
+
+  it('does not borrow a naked legacy draft for an explicitly profiled runtime collision', () => {
+    const tiles = [bound('b', 'run-shared')]
+    const legacy = state(0)
+    const states = { 'run-shared': legacy }
+
+    expect(blankDraftTile(tiles, states, 'b')).toBeNull()
+    expect(states['run-shared']).toBe(legacy)
+  })
+
+  it('reads the tile state from its active profile when runtimes collide', () => {
+    const tiles = [{ ...bound('a', 'run-shared'), profile: 'work' }]
+    const states = {
+      'other\u0000run-shared': state(2, true),
+      'work\u0000run-shared': state(0)
+    }
+
+    expect(blankDraftTile(tiles, states, 'work')).toEqual(tiles[0])
+    expect(blankDraftTile(tiles, states, 'other')).toBeNull()
   })
 
   it('leaves a blank-but-busy tab alone — its first turn is already in flight', () => {

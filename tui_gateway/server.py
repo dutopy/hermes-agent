@@ -290,6 +290,33 @@ _LONG_HANDLERS = frozenset(
         "shell.exec",
         "skills.manage",
         "slash.exec",
+        # Roadmaps open the per-profile projects.db (connect() runs schema
+        # validation + WAL setup) and mutations take an IMMEDIATE write txn —
+        # under GIL pressure from concurrent agent turns that can be slow, so
+        # keep reads AND writes off the WS reader thread.
+        "plans.activate",
+        "plans.create",
+        "plans.get",
+        "plans.list",
+        "plans.validate",
+        "roadmaps.archive",
+        "roadmaps.attach_session",
+        "roadmaps.advance_node",
+        "roadmaps.block_node",
+        "roadmaps.claim_node",
+        "roadmaps.complete_node",
+        "roadmaps.create",
+        "roadmaps.get",
+        "roadmaps.list",
+        "roadmaps.snapshot",
+        "roadmaps.sessions",
+        # planning_rules is a pure versioned-rules lookup (no DB); it stays on
+        # the pool with the other roadmaps reads for a uniform off-reader path.
+        "roadmaps.planning_rules",
+        "roadmaps.unblock_node",
+        "roadmaps.update",
+        "roadmaps.update_progress",
+        "roadmaps.update_todo",
     }
 )
 
@@ -14439,6 +14466,7 @@ from . import (  # noqa: E402
     methods_complete as _methods_complete,
     methods_config as _methods_config,
     methods_images as _methods_images,
+    methods_roadmaps as _methods_roadmaps,
     methods_profiles as _methods_profiles,
     methods_prompt as _methods_prompt,
     methods_session as _methods_session,
@@ -14453,6 +14481,7 @@ for _m in (
     _methods_tools,
     _methods_profiles,
     _methods_images,
+    _methods_roadmaps,
 ):
     _m.register(sys.modules[__name__])
 del _m

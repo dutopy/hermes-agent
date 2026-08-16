@@ -19,15 +19,18 @@ import {
   setCurrentModelSource,
   setCurrentProvider
 } from '@/store/session'
-import { $sessionStates, sessionTileDelegate } from '@/store/session-states'
+import { $sessionStates, sessionRuntimeState, sessionTileDelegate } from '@/store/session-states'
 import type { ModelOptionsResponse } from '@/types/hermes'
 
 interface ModelControlsOptions {
+  /** Explicit owner for an embedded surface. Omitted preserves the foreground
+   * primary behavior. */
+  profile?: string
   queryClient: QueryClient
   requestGateway: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
 }
 
-export function useModelControls({ queryClient, requestGateway }: ModelControlsOptions) {
+export function useModelControls({ profile, queryClient, requestGateway }: ModelControlsOptions) {
   const { t } = useI18n()
   const copy = t.desktop
   const profileRefreshEpochRef = useRef(0)
@@ -168,16 +171,21 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
     async (selection: ModelSelection): Promise<boolean> => {
       const primaryRuntimeId = $activeSessionId.get()
       const liveSessionId = 'sessionId' in selection ? (selection.sessionId ?? null) : primaryRuntimeId
-      const touchesPrimary = !liveSessionId || liveSessionId === primaryRuntimeId
+      // An explicitly-profiled caller is an embedded owner even when its runtime
+      // string collides with the foreground session. Only legacy/primary callers
+      // may mutate the global composer atoms.
+      const touchesPrimary = profile == null && (!liveSessionId || liveSessionId === primaryRuntimeId)
 
-      const prevModel = touchesPrimary ? $currentModel.get() : ($sessionStates.get()[liveSessionId!]?.model ?? '')
+      const prevModel = touchesPrimary
+        ? $currentModel.get()
+        : (sessionRuntimeState($sessionStates.get(), profile, liveSessionId!)?.model ?? '')
 
       const prevProvider = touchesPrimary
         ? $currentProvider.get()
-        : ($sessionStates.get()[liveSessionId!]?.provider ?? '')
+        : (sessionRuntimeState($sessionStates.get(), profile, liveSessionId!)?.provider ?? '')
 
       const prevSource = getCurrentModelSource()
-      const liveGatewayProfile = $activeGatewayProfile.get()
+      const liveGatewayProfile = profile ?? $activeGatewayProfile.get()
 
       if (touchesPrimary) {
         setCurrentModel(selection.model)
@@ -185,11 +193,15 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
         markComposerSelectionManual()
       } else if (liveSessionId) {
         // Optimistic tile paint — session.info will confirm; rollback on error.
-        sessionTileDelegate()?.updateSession(liveSessionId, state => ({
-          ...state,
-          model: selection.model,
-          provider: selection.provider
-        }))
+        sessionTileDelegate()?.updateSession(
+          liveSessionId,
+          state => ({
+            ...state,
+            model: selection.model,
+            provider: selection.provider
+          }),
+          profile
+        )
       }
 
       updateModelOptionsCache(
@@ -238,11 +250,15 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
           setCurrentProvider(prevProvider)
           setCurrentModelSource(prevSource)
         } else if (liveSessionId) {
-          sessionTileDelegate()?.updateSession(liveSessionId, state => ({
-            ...state,
-            model: prevModel,
-            provider: prevProvider
-          }))
+          sessionTileDelegate()?.updateSession(
+            liveSessionId,
+            state => ({
+              ...state,
+              model: prevModel,
+              provider: prevProvider
+            }),
+            profile
+          )
         }
 
         updateModelOptionsCache(
@@ -252,12 +268,12 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
           touchesPrimary && !liveSessionId,
           liveGatewayProfile
         )
-        notifyError(err, copy.modelSwitchFailed)
+        notifyError(profile ? new Error(copy.modelSwitchFailed) : err, copy.modelSwitchFailed)
 
         return false
       }
     },
-    [copy.modelSwitchFailed, queryClient, requestGateway, updateModelOptionsCache]
+    [copy.modelSwitchFailed, profile, queryClient, requestGateway, updateModelOptionsCache]
   )
 
   return { applySavedMainModel, refreshCurrentModel, selectModel }

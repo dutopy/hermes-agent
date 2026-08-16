@@ -19,12 +19,12 @@ import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } f
 import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
 import { parkQueuedPrompts, removeQueuedPrompt, unparkQueuedPrompts } from '@/store/composer-queue'
 import { $hudMode } from '@/store/hud'
-import { sessionBlockingPrompt } from '@/store/prompts'
 import { toggleReview } from '@/store/review'
-import { $gatewayState } from '@/store/session'
 import { $threadScrolledUp } from '@/store/thread-scroll'
 import { $autoSpeakReplies } from '@/store/voice-prefs'
 import { useTheme } from '@/themes'
+
+import { useSessionView } from '../session-view'
 
 import { AttachmentList } from './attachments'
 import {
@@ -70,7 +70,7 @@ import {
   normalizeComposerEditorDom,
   RICH_INPUT_SLOT
 } from './rich-editor'
-import { useComposerScope } from './scope'
+import { composerBlockingPrompt, useComposerScope } from './scope'
 import { ComposerStatusStack } from './status-stack'
 import { CodingStatusRow } from './status-stack/coding-row'
 import { SuggestionPills } from './suggestion-pills'
@@ -149,8 +149,9 @@ export function ChatBar({
   // Which live composer this instance IS (main | tile) — its attachment set,
   // focus-bus key, and awaiting-input edge. Main scope = the legacy globals.
   const scope = useComposerScope()
+  const view = useSessionView()
   const attachments = useStore(scope.attachments.$attachments)
-  const compacting = useStore(useMemo(() => sessionCompacting(sessionId ?? null), [sessionId]))
+  const compacting = useStore(useMemo(() => sessionCompacting(sessionId ?? null, scope.profile), [scope.profile, sessionId]))
   const scrolledUp = useStore($threadScrolledUp)
   const autoSpeak = useStore($autoSpeakReplies)
   // The turn is parked on the user (clarify / approval / sudo / secret). Esc must
@@ -158,10 +159,14 @@ export function ChatBar({
   // would discard a question the user may want to come back to. The blocking
   // prompt owns its own dismissal (Skip, Reject, dialog close).
   const awaitingInput = useStore(scope.$awaitingInput)
+
   // Parked on an approval/sudo/secret prompt: typing can't answer those, so the
   // busy submit routes text to the queue instead of a steer (which would sit
   // undelivered behind the blocked tool batch). Drives the button affordance.
-  const blockingPrompt = useStore(useMemo(() => sessionBlockingPrompt(sessionId ?? null), [sessionId]))
+  const blockingPrompt = useStore(
+    useMemo(() => composerBlockingPrompt(sessionId ?? null, scope), [scope, sessionId])
+  )
+
   const activeQueueSessionKey = queueSessionKey || sessionId || null
 
   // Status items (subagents, background processes) are keyed by the RUNTIME
@@ -171,7 +176,7 @@ export function ChatBar({
 
   // Coarse edge: re-renders ChatBar only when the stack shows/hides, NOT on
   // every per-item status mutation or other sessions' churn (see the hook).
-  const statusPresent = useSessionStatusPresence(statusSessionId)
+  const statusPresent = useSessionStatusPresence(statusSessionId, scope.profile)
 
   // Publishes contributed micro actions for this session; the status stack
   // renders them as the pill strip at the top of the overlay lane.
@@ -207,7 +212,7 @@ export function ChatBar({
   const emoji = useEmojiCompletions()
 
   const { t } = useI18n()
-  const gatewayState = useStore($gatewayState)
+  const gatewayState = useStore(view.$gatewayState)
   const reconnecting = gatewayState === 'closed' || gatewayState === 'error'
   const inputDisabled = disabled && !reconnecting
 
@@ -1134,6 +1139,7 @@ export function ChatBar({
               grows upward over the thread and the dock's own measurement covers
               it. Collapses to nothing when every status is empty. */}
           <ComposerStatusStack
+            profile={scope.profile}
             queue={
               activeQueueSessionKey && queuedPrompts.length > 0 ? (
                 <QueuePanel

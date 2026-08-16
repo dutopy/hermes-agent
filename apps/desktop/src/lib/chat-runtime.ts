@@ -26,6 +26,7 @@ export function createClientSessionState(
     messages,
     branch: '',
     cwd: '',
+    terminalBackend: '',
     model: '',
     provider: '',
     reasoningEffort: '',

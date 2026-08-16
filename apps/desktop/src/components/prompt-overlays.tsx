@@ -18,8 +18,8 @@ import { useI18n } from '@/i18n'
 import { isMissingPendingPromptRequest } from '@/lib/gateway-rpc'
 import { triggerHaptic } from '@/lib/haptics'
 import { KeyRound, Loader2, Lock } from '@/lib/icons'
-import { $gateway } from '@/store/gateway'
-import { notifyError } from '@/store/notifications'
+import { $gateway, requestGatewayForProfile } from '@/store/gateway'
+import { notifyError, notifyPromptResponseError } from '@/store/notifications'
 import { clearSecretRequest, clearSudoRequest, sessionSecretRequest, sessionSudoRequest } from '@/store/prompts'
 
 // Renders the modal mid-turn prompts the gateway raises and waits on: sudo
@@ -35,10 +35,10 @@ import { clearSecretRequest, clearSudoRequest, sessionSecretRequest, sessionSudo
 // fire a second `*.respond` alongside onOpenChange (double-send) or block the
 // backdrop-dismiss path.
 
-function SudoDialog({ sessionId }: { sessionId: string | null }) {
+function SudoDialog({ profile, sessionId }: { profile?: string; sessionId: string | null }) {
   const { t } = useI18n()
   const copy = t.prompts
-  const $request = useMemo(() => sessionSudoRequest(sessionId), [sessionId])
+  const $request = useMemo(() => sessionSudoRequest(sessionId, profile), [profile, sessionId])
   const request = useStore($request)
   const gateway = useStore($gateway)
   const [password, setPassword] = useState('')
@@ -55,7 +55,9 @@ function SudoDialog({ sessionId }: { sessionId: string | null }) {
         return
       }
 
-      if (!gateway) {
+      const ownerProfile = request.profile
+
+      if (!ownerProfile && !gateway) {
         notifyError(new Error(copy.gatewayDisconnected), copy.sudoSendFailed)
 
         return
@@ -64,20 +66,23 @@ function SudoDialog({ sessionId }: { sessionId: string | null }) {
       setSubmitting(true)
 
       try {
-        await gateway.request<{ status?: string }>('sudo.respond', {
-          password: value,
-          request_id: request.requestId
-        })
+        const params = { password: value, request_id: request.requestId }
+
+        if (ownerProfile) {
+          await requestGatewayForProfile<{ status?: string }>(ownerProfile, 'sudo.respond', params)
+        } else {
+          await gateway!.request<{ status?: string }>('sudo.respond', params)
+        }
         triggerHaptic('submit')
-        clearSudoRequest(request.sessionId, request.requestId)
+        clearSudoRequest(request.sessionId, request.requestId, request.profile)
       } catch (error) {
         if (isMissingPendingPromptRequest(error, 'password')) {
-          clearSudoRequest(request.sessionId, request.requestId)
+          clearSudoRequest(request.sessionId, request.requestId, request.profile)
 
           return
         }
 
-        notifyError(error, copy.sudoSendFailed)
+        notifyPromptResponseError(error, copy.sudoSendFailed, ownerProfile)
         setSubmitting(false)
       }
     },
@@ -138,10 +143,10 @@ function SudoDialog({ sessionId }: { sessionId: string | null }) {
   )
 }
 
-function SecretDialog({ sessionId }: { sessionId: string | null }) {
+function SecretDialog({ profile, sessionId }: { profile?: string; sessionId: string | null }) {
   const { t } = useI18n()
   const copy = t.prompts
-  const $request = useMemo(() => sessionSecretRequest(sessionId), [sessionId])
+  const $request = useMemo(() => sessionSecretRequest(sessionId, profile), [profile, sessionId])
   const request = useStore($request)
   const gateway = useStore($gateway)
   const [value, setValue] = useState('')
@@ -158,7 +163,9 @@ function SecretDialog({ sessionId }: { sessionId: string | null }) {
         return
       }
 
-      if (!gateway) {
+      const ownerProfile = request.profile
+
+      if (!ownerProfile && !gateway) {
         notifyError(new Error(copy.gatewayDisconnected), copy.secretSendFailed)
 
         return
@@ -167,20 +174,23 @@ function SecretDialog({ sessionId }: { sessionId: string | null }) {
       setSubmitting(true)
 
       try {
-        await gateway.request<{ status?: string }>('secret.respond', {
-          request_id: request.requestId,
-          value: secret
-        })
+        const params = { request_id: request.requestId, value: secret }
+
+        if (ownerProfile) {
+          await requestGatewayForProfile<{ status?: string }>(ownerProfile, 'secret.respond', params)
+        } else {
+          await gateway!.request<{ status?: string }>('secret.respond', params)
+        }
         triggerHaptic('submit')
-        clearSecretRequest(request.sessionId, request.requestId)
+        clearSecretRequest(request.sessionId, request.requestId, request.profile)
       } catch (error) {
         if (isMissingPendingPromptRequest(error, 'value')) {
-          clearSecretRequest(request.sessionId, request.requestId)
+          clearSecretRequest(request.sessionId, request.requestId, request.profile)
 
           return
         }
 
-        notifyError(error, copy.secretSendFailed)
+        notifyPromptResponseError(error, copy.secretSendFailed, ownerProfile)
         setSubmitting(false)
       }
     },
@@ -242,12 +252,12 @@ function SecretDialog({ sessionId }: { sessionId: string | null }) {
 /** Mid-turn prompt surfaces for ONE session. Mounted by both the primary chat
  *  and each tile with its own session id, so a background/tiled session's
  *  blocking prompt renders instead of silently stalling. */
-export function PromptOverlays({ sessionId }: { sessionId: string | null }) {
+export function PromptOverlays({ profile, sessionId }: { profile?: string; sessionId: string | null }) {
   return (
     <>
       <PendingApprovalFallback />
-      <SudoDialog sessionId={sessionId} />
-      <SecretDialog sessionId={sessionId} />
+      <SudoDialog profile={profile} sessionId={sessionId} />
+      <SecretDialog profile={profile} sessionId={sessionId} />
     </>
   )
 }

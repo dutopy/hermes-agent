@@ -4,12 +4,13 @@ import { useEffect } from 'react'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $changeEventsAvailable, $cronChangeTick, $sessionsChangeTick } from '@/store/live-sync'
 import { $onBattery, batteryPollInterval } from '@/store/power'
-import { refreshActiveProfile } from '@/store/profile'
+import { normalizeProfileKey, refreshActiveProfile } from '@/store/profile'
 import { $activeSessionId, $currentCwd, setCurrentCwd } from '@/store/session'
 import {
   $sessionStates,
   publishSessionState,
   SESSION_WATCHDOG_TIMEOUT_MS,
+  sessionRuntimeStateKey,
   setSessionStalled
 } from '@/store/session-states'
 
@@ -74,8 +75,10 @@ const liveRuntimeIdsByProfile = new Map<string, Set<string>>()
 export function rehydrateLiveSessionStatuses(
   response: LiveSessionStatusResponse,
   nowMs = Date.now(),
-  profileKey = 'default'
+  profileKey?: string
 ): void {
+  const ownerProfile = profileKey == null ? null : normalizeProfileKey(profileKey)
+  const trackingProfile = normalizeProfileKey(profileKey)
   const seen = new Set<string>()
 
   for (const session of response.sessions ?? []) {
@@ -90,7 +93,7 @@ export function rehydrateLiveSessionStatuses(
 
     seen.add(runtimeSessionId)
 
-    const existing = $sessionStates.get()[runtimeSessionId]
+    const existing = $sessionStates.get()[sessionRuntimeStateKey(ownerProfile, runtimeSessionId)]
 
     // A turn we just submitted is not yet running as far as the backend is
     // concerned, so the snapshot honestly reports it idle — but the local
@@ -109,16 +112,20 @@ export function rehydrateLiveSessionStatuses(
       existing.busy !== busy ||
       existing.needsInput !== needsInput
     ) {
-      publishSessionState(runtimeSessionId, {
-        ...(existing ?? createClientSessionState(storedSessionId)),
-        busy,
-        needsInput,
-        storedSessionId
-      })
+      publishSessionState(
+        runtimeSessionId,
+        {
+          ...(existing ?? createClientSessionState(storedSessionId)),
+          busy,
+          needsInput,
+          storedSessionId
+        },
+        ownerProfile
+      )
     }
 
     if (!working) {
-      setSessionStalled(storedSessionId, false)
+      setSessionStalled(storedSessionId, false, ownerProfile)
 
       continue
     }
@@ -131,7 +138,7 @@ export function rehydrateLiveSessionStatuses(
       lastActiveMs > 0 &&
       nowMs - lastActiveMs >= SESSION_WATCHDOG_TIMEOUT_MS
 
-    setSessionStalled(storedSessionId, isQuiet)
+    setSessionStalled(storedSessionId, isQuiet, ownerProfile)
   }
 
   // A runtime this profile's snapshot reported live LAST poll but not this one
@@ -140,7 +147,7 @@ export function rehydrateLiveSessionStatuses(
   // path so the busy→idle transition fires — that edge is what clears the
   // spinner AND marks the row unread ("your turn"). Only ids this profile
   // previously saw are eligible, so another profile's live rows are untouched.
-  const previouslyLive = liveRuntimeIdsByProfile.get(profileKey)
+  const previouslyLive = liveRuntimeIdsByProfile.get(trackingProfile)
 
   if (previouslyLive) {
     for (const runtimeSessionId of previouslyLive) {
@@ -148,22 +155,26 @@ export function rehydrateLiveSessionStatuses(
         continue
       }
 
-      const existing = $sessionStates.get()[runtimeSessionId]
+      const existing = $sessionStates.get()[sessionRuntimeStateKey(ownerProfile, runtimeSessionId)]
 
       if (existing?.busy || existing?.needsInput) {
-        publishSessionState(runtimeSessionId, {
-          ...existing,
-          awaitingResponse: false,
-          busy: false,
-          needsInput: false,
-          streamId: null,
-          turnStartedAt: null
-        })
+        publishSessionState(
+          runtimeSessionId,
+          {
+            ...existing,
+            awaitingResponse: false,
+            busy: false,
+            needsInput: false,
+            streamId: null,
+            turnStartedAt: null
+          },
+          ownerProfile
+        )
       }
     }
   }
 
-  liveRuntimeIdsByProfile.set(profileKey, seen)
+  liveRuntimeIdsByProfile.set(trackingProfile, seen)
 }
 
 /** Forget every profile's live-runtime bookkeeping. A gateway wipe already

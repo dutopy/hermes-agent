@@ -33,8 +33,12 @@ declare global {
       // the user can work with multiple chats side by side. Returns ok:false
       // with an error code when the sessionId is empty/invalid. `watch` opens
       // a spectator window (lazy resume — no agent build) for live-streaming
-      // a running subagent's session.
-      openSessionWindow: (sessionId: string, opts?: { watch?: boolean }) => Promise<{ ok: boolean; error?: string }>
+      // a running subagent's session. `profile` is the durable owner and keeps
+      // homonymous stored ids on distinct backends/windows.
+      openSessionWindow: (
+        sessionId: string,
+        opts?: { profile?: string; watch?: boolean }
+      ) => Promise<{ ok: boolean; error?: string }>
       // Open a new full-chrome app window — a peer instance of the primary that
       // renders the complete app against the shared backend, so the user can run
       // multiple GUI windows at once.
@@ -304,8 +308,10 @@ declare global {
       ) => () => void
       signalDeepLinkReady?: () => Promise<{ ok: boolean }>
       onWindowStateChanged?: (callback: (payload: HermesWindowState) => void) => () => void
-      onFocusSession?: (callback: (sessionId: string) => void) => () => void
-      onNotificationAction?: (callback: (payload: { actionId: string; sessionId?: string }) => void) => () => void
+      onFocusSession?: (callback: (payload: { profile?: string; sessionId: string }) => void) => () => void
+      onNotificationAction?: (
+        callback: (payload: { actionId: string; profile?: string; sessionId?: string }) => void
+      ) => () => void
       onPreviewFileChanged: (callback: (payload: HermesPreviewFileChanged) => void) => () => void
       onBackendExit: (callback: (payload: BackendExit) => void) => () => void
       // Soft gateway-mode apply: primary backend was torn down without a window
@@ -832,6 +838,7 @@ export interface HermesNotification {
   body?: string
   silent?: boolean
   kind?: string
+  profile?: string
   sessionId?: string
   /** Dedupe discriminator for session-less notifications (e.g. plugin id). */
   tag?: string

@@ -3,7 +3,7 @@ import { createContext, useContext } from 'react'
 
 import type { ChatMessage } from '@/lib/chat-messages'
 import { type ComposerAttachmentScope, mainComposerScope } from '@/store/composer'
-import { $activeSessionAwaitingInput } from '@/store/prompts'
+import { $activeSessionAwaitingInput, sessionBlockingPrompt } from '@/store/prompts'
 import { $messages } from '@/store/session'
 
 import type { ComposerTarget } from './focus'
@@ -27,6 +27,8 @@ export interface ComposerScope {
    *  keep streaming out of the composer's renders; subscribe only off-render
    *  (auto-speak) where the reply edge is the whole point. */
   $messages: ReadableAtom<ChatMessage[]>
+  /** Explicit transport/store owner for embedded surfaces; absent is primary legacy. */
+  profile?: string
   /** Focus-bus routing key (`'main'` | `'tile:<id>'`). */
   target: ComposerTarget
 }
@@ -43,3 +45,6 @@ const ComposerScopeContext = createContext<ComposerScope>(MAIN_COMPOSER_SCOPE)
 export const ComposerScopeProvider = ComposerScopeContext.Provider
 
 export const useComposerScope = (): ComposerScope => useContext(ComposerScopeContext)
+
+export const composerBlockingPrompt = (sessionId: string | null, scope: Pick<ComposerScope, 'profile'>) =>
+  sessionBlockingPrompt(sessionId, scope.profile)

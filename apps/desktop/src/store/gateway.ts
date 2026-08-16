@@ -58,6 +58,7 @@ interface GatewayRegistryState {
   activeKey: string
   secondaries: Map<string, Secondary>
   $gateway: ReturnType<typeof atom<HermesGateway | null>>
+  profileListeners: Set<(profile: string) => void>
 }
 
 const STATE_KEY = Symbol.for('hermes.desktop.gatewayRegistryState')
@@ -72,7 +73,8 @@ function createRegistryState(): GatewayRegistryState {
     // The active gateway instance, exposed for inline message-stream
     // components (inline ClarifyTool, model overlays) that call gateway
     // methods without the instance threaded down through props.
-    $gateway: atom<HermesGateway | null>(null)
+    $gateway: atom<HermesGateway | null>(null),
+    profileListeners: new Set()
   }
 }
 
@@ -117,8 +119,39 @@ export function emitLocalGatewayEvent(event: GatewayEvent): void {
 }
 
 export function setPrimaryGateway(gateway: HermesGateway | null, profile = 'default'): void {
+  const previousProfile = g.primaryProfile
   g.primaryGateway = gateway
   g.primaryProfile = normKey(profile)
+  g.profileListeners.forEach(listener => listener(previousProfile))
+
+  if (g.primaryProfile !== previousProfile) {
+    g.profileListeners.forEach(listener => listener(g.primaryProfile))
+  }
+}
+
+/** Read a profile's transport without changing the foreground route. */
+export function gatewayForProfile(profile: string): HermesGateway | null {
+  const key = normKey(profile)
+
+  return key === g.primaryProfile ? g.primaryGateway : (g.secondaries.get(key)?.gateway ?? null)
+}
+
+/** Observe profile transport installation/reconnect without observing activeKey. */
+export function subscribeProfileGateways(listener: (profile: string) => void): () => void {
+  g.profileListeners.add(listener)
+
+  return () => g.profileListeners.delete(listener)
+}
+
+/** Observe only one profile's transport installation and connection changes. */
+export function subscribeProfileGateway(profile: string, listener: () => void): () => void {
+  const key = normKey(profile)
+
+  return subscribeProfileGateways(changedProfile => {
+    if (normKey(changedProfile) === key) {
+      listener()
+    }
+  })
 }
 
 export function isActivePrimary(): boolean {
@@ -151,6 +184,7 @@ function reportGatewayState(profile: string, state: ConnectionState): void {
 
 export function reportPrimaryGatewayState(state: ConnectionState): void {
   reportGatewayState(g.primaryProfile, state)
+  g.profileListeners.forEach(listener => listener(g.primaryProfile))
 }
 
 function setActive(profile: string): void {
@@ -240,9 +274,12 @@ function createSecondary(profile: string): Secondary {
     } else if ((state === 'closed' || state === 'error') && entry.wantOpen) {
       scheduleReconnect(entry)
     }
+
+    g.profileListeners.forEach(listener => listener(profile))
   })
 
   g.secondaries.set(profile, entry)
+  g.profileListeners.forEach(listener => listener(profile))
 
   return entry
 }
@@ -265,6 +302,48 @@ export async function openGatewayForProfile(profile: string): Promise<void> {
 
   if (!isOpen(entry.gateway)) {
     await openSecondary(entry)
+  }
+}
+
+/** Request through the owning socket without ever activating that profile. */
+export async function requestGatewayForProfile<T>(
+  profile: string,
+  method: string,
+  params: Record<string, unknown> = {},
+  timeoutMs?: number,
+  signal?: AbortSignal
+): Promise<T> {
+  const key = normKey(profile)
+  await openGatewayForProfile(key)
+  let gateway = gatewayForProfile(key)
+
+  if (!gateway) {
+    throw new Error('Hermes gateway unavailable')
+  }
+
+  try {
+    return await gateway.request<T>(method, params, timeoutMs, signal)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+
+    if (key === g.primaryProfile || !/not connected|connection closed/i.test(message)) {
+      throw error
+    }
+
+    const entry = g.secondaries.get(key)
+
+    if (!entry) {
+      throw error
+    }
+
+    await reconnectSecondary(entry)
+    gateway = gatewayForProfile(key)
+
+    if (!gateway || !isOpen(gateway)) {
+      throw error
+    }
+
+    return gateway.request<T>(method, params, timeoutMs, signal)
   }
 }
 
@@ -366,6 +445,7 @@ export function pruneSecondaryGateways(keep: Set<string>): void {
 
     disposeSecondary(entry)
     g.secondaries.delete(key)
+    g.profileListeners.forEach(listener => listener(key))
   }
 }
 

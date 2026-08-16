@@ -96,12 +96,13 @@ interface AgentTerminalInstanceProps {
   active: boolean
   id: string
   procId: string
+  profile?: string
 }
 
 /** Read-only mirror of an agent background process — a write-only xterm streamed
  *  live from the backend output (no PTY, no input). */
-export function AgentTerminalInstance({ active, id, procId }: AgentTerminalInstanceProps) {
-  const { hostRef } = useAgentTerminal({ active, id, procId })
+export function AgentTerminalInstance({ active, id, procId, profile }: AgentTerminalInstanceProps) {
+  const { hostRef } = useAgentTerminal({ active, id, procId, profile })
 
   return (
     <div

@@ -14,6 +14,7 @@ import { AlertCircle, CheckCircle2 } from '@/lib/icons'
 import { displayModelName } from '@/lib/model-status-label'
 import { useSessionSlice } from '@/lib/use-session-slice'
 import { cn } from '@/lib/utils'
+import { sessionRuntimeStateKey } from '@/store/session-states'
 import { $subagentsBySession } from '@/store/subagents'
 import { openSessionInNewWindow } from '@/store/windows'
 
@@ -136,8 +137,13 @@ function DelegateRowView({ row }: { row: DelegateRow }) {
  * them nothing.
  */
 export const DelegateTool: FC<Pick<ToolPart, 'args' | 'result' | 'toolCallId'>> = ({ args, result, toolCallId }) => {
-  const sessionId = useStore(useSessionView().$runtimeId)
-  const live = useSessionSlice($subagentsBySession, sessionId)
+  const view = useSessionView()
+  const sessionId = useStore(view.$runtimeId)
+
+  const live = useSessionSlice(
+    $subagentsBySession,
+    sessionId ? sessionRuntimeStateKey(view.profile, sessionId) : null
+  )
 
   const rows = useMemo(
     () => mergeDelegateRows(delegateRowsFromCall(args, result, toolCallId), live, toolCallId),

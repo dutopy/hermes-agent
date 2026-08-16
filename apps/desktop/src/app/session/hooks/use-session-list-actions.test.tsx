@@ -155,7 +155,7 @@ describe('refreshSessions identity + loading hygiene', () => {
     // A delete RPC is in flight: the row is tombstoned optimistically but the
     // batched refresh still carries it (and a lineage-tip variant). Both must be
     // filtered so the optimistic removal never flashes back.
-    removed.ids = new Set(['b', 'root-c'])
+    removed.ids = new Set(['default\u0000b', 'default\u0000root-c'])
     listSidebarSessions.mockResolvedValue(
       sidebar({
         sessions: [row('a'), row('b'), row('c', { _lineage_root_id: 'root-c' } as Partial<SessionInfo>)]
@@ -169,6 +169,41 @@ describe('refreshSessions identity + loading hygiene', () => {
     })
 
     expect($sessions.get().map(s => s.id)).toEqual(['a'])
+  })
+
+  it('filters only the tombstoned profile homonym in an all-profile refresh', async () => {
+    removed.ids = new Set(['profile-b\u0000same'])
+    listSidebarSessions.mockResolvedValue(
+      sidebar({
+        sessions: [
+          row('same', { profile: 'profile-a', title: 'A' }),
+          row('same', { profile: 'profile-b', title: 'B' })
+        ]
+      })
+    )
+    const { result } = renderHook(() => useSessionListActions({ profileScope: '__all__' }))
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+
+    expect($sessions.get().map(s => `${s.profile}:${s.title}`)).toEqual(['profile-a:A'])
+  })
+
+  it('uses a bare tombstone only for an omitted-profile legacy row', async () => {
+    removed.ids = new Set(['same'])
+    listSidebarSessions.mockResolvedValue(
+      sidebar({
+        sessions: [row('same', { profile: undefined, title: 'Legacy' }), row('same', { profile: 'default', title: 'Owned' })]
+      })
+    )
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+
+    expect($sessions.get().map(session => session.title)).toEqual(['Owned'])
   })
 
   it('still shows loading for the initial (empty-list) fetch', async () => {

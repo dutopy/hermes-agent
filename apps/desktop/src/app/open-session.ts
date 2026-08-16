@@ -72,7 +72,8 @@ export function openSessionIntentFromModifiers(
 export function openSession(
   storedSessionId: string,
   navigate: OpenSessionNavigate,
-  intent: OpenSessionIntent = 'in-place'
+  intent: OpenSessionIntent = 'in-place',
+  profile?: string
 ): void {
   if (!storedSessionId) {
     return
@@ -82,7 +83,9 @@ export function openSession(
 
   if (resolved === 'window') {
     if (canOpenSessionWindow()) {
-      void openSessionInNewWindow(storedSessionId)
+      void (profile == null
+        ? openSessionInNewWindow(storedSessionId)
+        : openSessionInNewWindow(storedSessionId, { profile }))
 
       return
     }
@@ -106,18 +109,18 @@ export function openSession(
     // Already on screen? Front it. openSessionTile would no-op on main without
     // focusing, or try to relocate an existing tile — neither is right for a
     // soft "open beside" link.
-    if (focusOpenSession(storedSessionId)) {
+    if (focusOpenSession(storedSessionId, profile)) {
       return
     }
 
     // Nothing to jump to, but an open tab may still be an empty "New session" —
     // that's the tab the user would have typed into, so spend it rather than
     // stacking a second blank one beside it.
-    if (spendBlankDraft && reuseBlankDraftTile(storedSessionId)) {
+    if (spendBlankDraft && reuseBlankDraftTile(storedSessionId, profile)) {
       return
     }
 
-    openSessionTile(storedSessionId, 'center')
+    openSessionTile(storedSessionId, 'center', undefined, undefined, profile)
 
     return
   }
@@ -126,7 +129,7 @@ export function openSession(
   // otherwise load it into main. From a full page (artifacts, skills, …) a
   // `'main'` hit still has to route back: fronting the workspace tab alone
   // leaves the page showing.
-  if (focusedSessionNeedsRoute(focusOpenSession(storedSessionId), $workspaceIsPage.get())) {
-    navigate(sessionRoute(storedSessionId))
+  if (focusedSessionNeedsRoute(focusOpenSession(storedSessionId, profile), $workspaceIsPage.get())) {
+    navigate(sessionRoute(storedSessionId, profile))
   }
 }

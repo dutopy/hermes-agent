@@ -57,8 +57,13 @@ function chatWindowWebPreferences(preloadPath: string) {
 // onboarding overlays and the global session sidebar. `watch=1` marks a
 // spectator window (e.g. a running subagent's session): the renderer resumes it
 // lazily so the gateway never builds an agent just to stream into it.
-function buildSessionWindowUrl(sessionId: string, { devServer, rendererIndexPath, watch }: any = {}) {
-  const query = `?win=secondary${watch ? '&watch=1' : ''}`
+function buildSessionWindowUrl(sessionId: string, { devServer, profile, rendererIndexPath, watch }: any = {}) {
+  const normalizedProfile = profile == null ? null : profile.trim() || 'default'
+
+  const query = `?win=secondary${watch ? '&watch=1' : ''}${
+    normalizedProfile === null ? '' : `&profile=${encodeURIComponent(normalizedProfile)}`
+  }`
+
   const route = `#/${encodeURIComponent(sessionId)}`
 
   if (devServer) {
@@ -92,7 +97,10 @@ function instanceWindowBounds(base: { x: number; y: number; width: number; heigh
   }
 }
 
-// A small registry keyed by sessionId that guarantees one window per chat:
+// A small registry keyed by normalized (profile, sessionId) that guarantees one
+// window per owned chat. The legacy two-argument call keeps its original bare
+// session-id key; an explicit profile never falls back to that compatibility
+// entry, including explicit `default`.
 // opening a session that already has a live window focuses it instead of
 // spawning a duplicate, and a window removes itself from the registry when it
 // closes. The actual BrowserWindow construction is injected (the `factory`) so
@@ -100,8 +108,22 @@ function instanceWindowBounds(base: { x: number; y: number; width: number; heigh
 function createSessionWindowRegistry() {
   const windows = new Map()
 
-  function openOrFocus(sessionId, factory) {
-    const key = typeof sessionId === 'string' ? sessionId.trim() : ''
+  function identityKey(sessionId, profile) {
+    const stored = typeof sessionId === 'string' ? sessionId.trim() : ''
+
+    if (!stored) {
+      return ''
+    }
+
+    return profile === undefined ? stored : `${typeof profile === 'string' ? profile.trim() || 'default' : 'default'}\u0000${stored}`
+  }
+
+  function openOrFocus(sessionId, profileOrFactory, maybeFactory = undefined) {
+    const legacy = typeof profileOrFactory === 'function'
+    const profile = legacy ? undefined : profileOrFactory
+    const factory = legacy ? profileOrFactory : maybeFactory
+    const stored = typeof sessionId === 'string' ? sessionId.trim() : ''
+    const key = identityKey(sessionId, profile)
 
     if (!key) {
       return null
@@ -124,7 +146,7 @@ function createSessionWindowRegistry() {
       return existing
     }
 
-    const win = factory(key)
+    const win = factory(stored)
 
     if (!win) {
       return null
@@ -144,8 +166,8 @@ function createSessionWindowRegistry() {
 
   return {
     openOrFocus,
-    get: key => windows.get(key),
-    has: key => windows.has(key),
+    get: (sessionId, profile = undefined) => windows.get(identityKey(sessionId, profile)),
+    has: (sessionId, profile = undefined) => windows.has(identityKey(sessionId, profile)),
     get size() {
       return windows.size
     }

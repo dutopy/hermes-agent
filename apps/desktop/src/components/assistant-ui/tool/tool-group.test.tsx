@@ -1,7 +1,9 @@
 import { AssistantRuntimeProvider, type ThreadMessage, useExternalStoreRuntime } from '@assistant-ui/react'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { atom } from 'nanostores'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { type SessionView, SessionViewProvider } from '@/app/chat/session-view'
 import { clearAllPrompts, setApprovalRequest } from '@/store/prompts'
 import { $activeSessionId } from '@/store/session'
 import { clearDismissedToolRows } from '@/store/tool-dismiss'
@@ -409,6 +411,23 @@ function GroupHarness({ message }: { message: ThreadMessage }) {
   )
 }
 
+function ProfileGroupHarness({ message, profile }: { message: ThreadMessage; profile: string }) {
+  const view = {
+    ...({} as SessionView),
+    $cwd: atom(''),
+    $runtimeId: atom<null | string>('sess-1'),
+    $storedId: atom<null | string>('stored-sess-1'),
+    kind: 'tile',
+    profile
+  } satisfies SessionView
+
+  return (
+    <SessionViewProvider value={view}>
+      <GroupHarness message={message} />
+    </SessionViewProvider>
+  )
+}
+
 beforeEach(() => {
   clearAllPrompts()
   $activeSessionId.set('sess-1')
@@ -494,6 +513,20 @@ describe('transcript fade', () => {
 })
 
 describe('live tool run', () => {
+  it('does not unfurl a profile-owned run for a colliding legacy approval', async () => {
+    setApprovalRequest({
+      command: 'rm -rf /tmp/x',
+      description: 'belongs to another profile',
+      sessionId: 'sess-1'
+    })
+
+    const { container } = render(<ProfileGroupHarness message={groupedPendingMessage()} profile="profile-b" />)
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-tool-ticker]')).not.toBeNull()
+    })
+  })
+
   it('keeps its rows on screen instead of hiding them behind the summary', async () => {
     const { container } = render(<GroupHarness message={groupedPendingMessage()} />)
 

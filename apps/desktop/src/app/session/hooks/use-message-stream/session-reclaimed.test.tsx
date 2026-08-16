@@ -5,8 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
 import { createClientSessionState } from '@/lib/chat-runtime'
-import { $sessionStates, publishSessionState } from '@/store/session-states'
+import { $sessionStates, publishSessionState, sessionRuntimeStateKey } from '@/store/session-states'
 import type { RpcEvent } from '@/types/hermes'
+
+const { reclaimSessionSurfaceRuntime } = vi.hoisted(() => ({
+  reclaimSessionSurfaceRuntime: vi.fn()
+}))
+
+vi.mock('@/app/contrib/hooks/use-session-tile-delegate', () => ({ reclaimSessionSurfaceRuntime }))
 
 import { useMessageStream } from './index'
 
@@ -57,6 +63,7 @@ const reclaim = (sessionId: string, reason = 'ws_orphan_reap') =>
   act(() =>
     handleEvent!({
       payload: { reason, session_id: sessionId, stored_session_id: 'stored-1' },
+      profile: ACTIVE_PROFILE,
       session_id: '',
       type: 'session.reclaimed'
     } as RpcEvent)
@@ -66,6 +73,7 @@ beforeEach(() => {
   handleEvent = null
   queryClient = new QueryClient()
   $sessionStates.set({})
+  reclaimSessionSurfaceRuntime.mockReset()
 })
 
 afterEach(() => {
@@ -77,25 +85,37 @@ afterEach(() => {
 describe('session.reclaimed', () => {
   it('drops the cached state for the reclaimed runtime', async () => {
     await mountStream()
-    publishSessionState('live-gone', createClientSessionState())
-    expect($sessionStates.get()['live-gone']).toBeDefined()
+    const key = sessionRuntimeStateKey(ACTIVE_PROFILE, 'live-gone')
+    publishSessionState('live-gone', createClientSessionState(), ACTIVE_PROFILE)
+    expect($sessionStates.get()[key]).toBeDefined()
 
     reclaim('live-gone')
 
-    expect($sessionStates.get()['live-gone']).toBeUndefined()
+    expect($sessionStates.get()[key]).toBeUndefined()
+  })
+
+  it('purges the embedded runtime binding for the authoritative source profile', async () => {
+    await mountStream()
+
+    reclaim('live-gone')
+
+    expect(reclaimSessionSurfaceRuntime).toHaveBeenCalledOnce()
+    expect(reclaimSessionSurfaceRuntime).toHaveBeenCalledWith(ACTIVE_PROFILE, 'live-gone')
   })
 
   it('leaves every other live session alone', async () => {
     await mountStream()
-    publishSessionState('live-gone', createClientSessionState())
-    publishSessionState('live-kept', createClientSessionState())
+    const goneKey = sessionRuntimeStateKey(ACTIVE_PROFILE, 'live-gone')
+    const keptKey = sessionRuntimeStateKey(ACTIVE_PROFILE, 'live-kept')
+    publishSessionState('live-gone', createClientSessionState(), ACTIVE_PROFILE)
+    publishSessionState('live-kept', createClientSessionState(), ACTIVE_PROFILE)
 
     reclaim('live-gone')
 
     // Both halves matter: the target went, the bystander stayed. Asserting
     // only the survivor would pass with no handler at all.
-    expect($sessionStates.get()['live-gone']).toBeUndefined()
-    expect($sessionStates.get()['live-kept']).toBeDefined()
+    expect($sessionStates.get()[goneKey]).toBeUndefined()
+    expect($sessionStates.get()[keptKey]).toBeDefined()
   })
 
   it('ignores a payload with no runtime id instead of clearing everything', async () => {
@@ -115,11 +135,12 @@ describe('session.reclaimed', () => {
       cleanup()
       handleEvent = null
       await mountStream()
-      publishSessionState('live-gone', createClientSessionState())
+      const key = sessionRuntimeStateKey(ACTIVE_PROFILE, 'live-gone')
+      publishSessionState('live-gone', createClientSessionState(), ACTIVE_PROFILE)
 
       reclaim('live-gone', reason)
 
-      expect($sessionStates.get()['live-gone'], reason).toBeUndefined()
+      expect($sessionStates.get()[key], reason).toBeUndefined()
     }
   })
 })
