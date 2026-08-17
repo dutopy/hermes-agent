@@ -115,7 +115,7 @@ export function PlanDraftLive({ preview, draftText, activeSessionId, visionSid, 
         ? jsxs('div', {
             className: 'flex min-h-0 flex-col gap-1',
             children: [
-              jsx('div', { className: 'truncate text-xs font-medium', children: preview.title || 'Untitled plan' }),
+              jsx('div', { className: 'truncate text-xs font-medium', children: preview.title || 'Draft plan' }),
               jsx('div', {
                 className: 'flex flex-wrap items-center gap-1.5 text-[0.625rem] text-(--ui-text-quaternary)',
                 children: `${plural(preview.counts.nodes, 'node')} · ${plural(preview.counts.relations, 'relation')} · ${plural(preview.counts.todos, 'todo')}`

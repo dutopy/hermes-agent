@@ -45,10 +45,12 @@ function VersionRow({ v, active, activating, onActivate }) {
             className: 'flex flex-wrap items-center gap-2',
             children: [
               jsx('span', {
-                className: cn('min-w-0 truncate text-xs', isActive ? 'font-semibold text-foreground' : 'text-(--ui-text-secondary)'),
-                children: v.title || `v${v.version}`
+                className: cn('min-w-0 truncate font-mono text-xs', isActive ? 'font-semibold text-foreground' : 'text-(--ui-text-secondary)'),
+                children: `v${v.version}`
               }),
-              jsx('span', { className: 'shrink-0 font-mono text-[0.625rem] text-(--ui-text-quaternary)', children: `v${v.version}` }),
+              v.title
+                ? jsx('span', { className: 'min-w-0 truncate text-[0.625rem] text-(--ui-text-tertiary)', children: v.title })
+                : null,
               isActive ? jsx(Badge, { size: 'xs', variant: 'outline', children: 'Active' }) : null,
               jsx('span', { className: 'font-mono text-[0.625rem] uppercase text-(--ui-text-tertiary)', children: v.state }),
               v.created_at

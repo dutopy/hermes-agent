@@ -1851,7 +1851,7 @@ function PlanDraftLive({ preview, draftText, activeSessionId, visionSid, saveBus
       hasPreview ? jsxs9("div", {
         className: "flex min-h-0 flex-col gap-1",
         children: [
-          jsx9("div", { className: "truncate text-xs font-medium", children: preview.title || "Untitled plan" }),
+          jsx9("div", { className: "truncate text-xs font-medium", children: preview.title || "Draft plan" }),
           jsx9("div", {
             className: "flex flex-wrap items-center gap-1.5 text-[0.625rem] text-(--ui-text-quaternary)",
             children: `${plural(preview.counts.nodes, "node")} \xB7 ${plural(preview.counts.relations, "relation")} \xB7 ${plural(preview.counts.todos, "todo")}`
@@ -1892,10 +1892,10 @@ function VersionRow({ v, active, activating, onActivate }) {
             className: "flex flex-wrap items-center gap-2",
             children: [
               jsx10("span", {
-                className: cn5("min-w-0 truncate text-xs", isActive ? "font-semibold text-foreground" : "text-(--ui-text-secondary)"),
-                children: v.title || `v${v.version}`
+                className: cn5("min-w-0 truncate font-mono text-xs", isActive ? "font-semibold text-foreground" : "text-(--ui-text-secondary)"),
+                children: `v${v.version}`
               }),
-              jsx10("span", { className: "shrink-0 font-mono text-[0.625rem] text-(--ui-text-quaternary)", children: `v${v.version}` }),
+              v.title ? jsx10("span", { className: "min-w-0 truncate text-[0.625rem] text-(--ui-text-tertiary)", children: v.title }) : null,
               isActive ? jsx10(Badge2, { size: "xs", variant: "outline", children: "Active" }) : null,
               jsx10("span", { className: "font-mono text-[0.625rem] uppercase text-(--ui-text-tertiary)", children: v.state }),
               v.created_at ? jsx10("span", { className: "ml-auto text-[0.625rem] tabular-nums text-(--ui-text-quaternary)", children: formatDate(v.created_at) }) : null

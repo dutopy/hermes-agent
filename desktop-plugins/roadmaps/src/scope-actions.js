@@ -300,7 +300,7 @@ export function RoadmapCreateForm({ profile, projectId, actor, onCreated, onCanc
 
   const submit = useCallback(async () => {
     if (busy) return
-    const trimmed = title.trim()
+    const trimmed = title.trim() || 'untitled'
     if (!validateRoadmapTitle(trimmed)) {
       setError({
         code: null,
@@ -341,7 +341,7 @@ export function RoadmapCreateForm({ profile, projectId, actor, onCreated, onCanc
               if (ev.key === 'Enter') void submit()
               if (ev.key === 'Escape') onCancel()
             },
-            placeholder: 'Roadmap title…',
+            placeholder: 'Roadmap title (blank = untitled)…',
             autoFocus: true,
             disabled: busy,
             className: 'h-6 w-48 px-1.5 text-xs',
@@ -352,7 +352,7 @@ export function RoadmapCreateForm({ profile, projectId, actor, onCreated, onCanc
             size: 'xs',
             variant: 'secondary',
             onClick: () => void submit(),
-            disabled: busy || title.trim() === '',
+            disabled: busy,
             children: 'Create'
           }),
           jsx(Button, {
