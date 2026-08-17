@@ -46,9 +46,10 @@ def seed(
              active_version, "creator", "creator", 1, 1),
         )
         conn.execute(
-            "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (profile, project, roadmap_id, 1,
              "validated" if active_version else "draft",
+             None,
              "seed", None, "creator", 1, None),
         )
     conn.commit()

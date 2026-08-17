@@ -37,7 +37,12 @@ export const RPC = {
   roadmap_sessions: 'roadmaps.sessions',
   attach_session: 'roadmaps.attach_session',
   plans_create: 'plans.create',
-  plans_activate: 'plans.activate'
+  plans_activate: 'plans.activate',
+  plans_check: 'plans.check',
+  team_list: 'team.list',
+  team_check: 'team.check',
+  readiness_list: 'readiness.list',
+  readiness_check: 'readiness.check'
 }
 
 /** Machine-state sort order for the thread view (config-driven). */
@@ -444,6 +449,8 @@ export async function createPlan(profile, projectId, roadmapId, payload, actor) 
   const reason = typeof payload?.reason === 'string' && payload.reason.trim() !== '' ? payload.reason.trim() : undefined
   if (source) params.source = source
   if (reason) params.reason = reason
+  const title = typeof payload?.title === 'string' && payload.title.trim() !== '' ? payload.title.trim() : undefined
+  if (title) params.title = title
   return host.request(RPC.plans_create, params)
 }
 

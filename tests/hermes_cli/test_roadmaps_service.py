@@ -15,7 +15,7 @@ def seed(path: Path) -> None:
     conn.execute("INSERT INTO projects(id, slug, name, created_at) VALUES ('p1', 'one', 'One', 1)")
     conn.execute("INSERT INTO projects(id, slug, name, created_at) VALUES ('p2', 'two', 'Two', 1)")
     conn.execute("INSERT INTO roadmaps VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('prof', 'p1', 'r1', 'Roadmap', 'Purpose', 'in_progress', 1, 'a', 'b', 1, 2))
-    conn.execute("INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('prof', 'p1', 'r1', 1, 'validated', 'src', 'why', 'a', 1, 'hash'))
+    conn.execute("INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('prof', 'p1', 'r1', 1, 'validated', None, 'src', 'why', 'a', 1, 'hash'))
     conn.execute("INSERT INTO roadmap_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('prof', 'p1', 'r1', 1, 'n1', None, 'objective', 'Node', None, 'ready', 50, 'agent', None, 1, 2))
     conn.execute("INSERT INTO roadmap_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('prof', 'p1', 'r1', 1, 'n2', None, 'step', 'Step', None, 'planned', 0, None, None, 1, 2))
     conn.execute("INSERT INTO roadmap_relations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", ('prof', 'p1', 'r1', 1, 'rel', 'n1', 'n2', 'blocks', 'active', None))

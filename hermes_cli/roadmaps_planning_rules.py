@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-PLANNING_RULES_VERSION = "1.1"
+PLANNING_RULES_VERSION = "1.2"
 
 
 class PlanningRulesVersionError(ValueError):
@@ -236,6 +236,33 @@ structure, jamais une retouche cosmétique.
 intermédiaire reste conversationnelle.
 """
 
+# v1.2 — cadrage interactif (amorce « Comment s'appelle votre projet ? ») +
+# itération du plan en direct, composé sur v1.1 (mêmes règles de structure).
+_CADRAGE_AMORCE_V1_2 = """\
+# Cadrage interactif (amorce)
+Tu commences TOUJOURS la session par cette question, avant toute autre chose :
+« Comment s'appelle votre projet ? »
+
+Puis pose, une par une, les questions pertinentes pour un cadrage impeccable —
+ne produis AUCUN plan tant que le cadrage n'est pas solide :
+- outcome visé et critères de succès mesurables ;
+- périmètre exact (in / out of scope) ;
+- contraintes (techniques, délais, budget, dépendances externes, ressources) ;
+- risques et blockers anticipés ;
+- équipe et ressources disponibles.
+
+Si une information manque ou est ambiguë, demande-la ; ne suppose jamais.
+Une fois le cadrage établi, produis le plan détaillé (bloc JSON strict).
+
+# Itération en direct
+Le plan est généré, modifié, augmenté et sculpté en direct. À chaque demande
+de modification de Pierre, produis la NOUVELLE VERSION COMPLÈTE du plan (bloc
+JSON strict mis à jour) — jamais un diff partiel, jamais une retouche muette.
+
+"""
+
+_PROMPT_V1_2 = _CADRAGE_AMORCE_V1_2 + _PROMPT_V1_1
+
 _RULES: dict[str, dict[str, Any]] = {
     "1.0": {
         "version": "1.0",
@@ -254,6 +281,20 @@ _RULES: dict[str, dict[str, Any]] = {
     "1.1": {
         "version": "1.1",
         "prompt": _PROMPT_V1_1,
+        "format": "strict-json",
+        "schema_kinds": ["objective", "milestone", "phase", "decision"],
+        "relation_kinds": [
+            "depends_on", "blocks", "enables", "follows", "validates", "supersedes",
+        ],
+        "node_states": [
+            "planned", "ready", "in_progress", "blocked", "completed", "archived",
+        ],
+        "controlled_vocabulary": "milestone/epic/task -> milestone/phase + todos",
+        "plan_transitions": "proposed -> validated -> active",
+    },
+    "1.2": {
+        "version": "1.2",
+        "prompt": _PROMPT_V1_2,
         "format": "strict-json",
         "schema_kinds": ["objective", "milestone", "phase", "decision"],
         "relation_kinds": [

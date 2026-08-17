@@ -44,3 +44,37 @@ export function NodeStateTag({ state }) {
     children: [jsx(StatusDot, { tone: NODE_TONE[state] ?? 'muted' }), NODE_STATE_LABEL[state] ?? state]
   })
 }
+
+/** Battery result: StatusDot + label, failures listed (code + hint). */
+export function BatteryBadge({ battery, label }) {
+  const failures = battery?.failures ?? []
+  const ok = battery?.ok === true
+  const count = failures.length
+  return jsxs('div', {
+    className: 'flex flex-col gap-1 px-0.5',
+    children: [
+      jsxs('span', {
+        className: 'inline-flex items-center gap-1.5 text-[0.625rem]',
+        children: [
+          jsx(StatusDot, { tone: ok ? 'good' : 'bad' }),
+          jsx('span', { className: 'text-(--ui-text-secondary)', children: label }),
+          jsx('span', {
+            className: ok ? 'text-(--ui-text-quaternary)' : 'text-destructive',
+            children: ok ? 'ready' : `${count} ${count === 1 ? 'failure' : 'failures'}`
+          })
+        ]
+      }),
+      count === 0
+        ? null
+        : jsxs('div', {
+            className: 'flex flex-col gap-0.5 pl-3.5',
+            children: failures.map((f) =>
+              jsxs('div', { className: 'flex flex-col', children: [
+                jsx('span', { className: 'font-mono text-[0.625rem] text-destructive', children: f.code }),
+                f.hint ? jsx('span', { className: 'text-[0.625rem] text-(--ui-text-tertiary)', children: f.hint }) : null
+              ]}, f.code)
+            )
+          })
+    ]
+  })
+}

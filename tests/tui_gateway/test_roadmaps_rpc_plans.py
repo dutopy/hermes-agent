@@ -19,8 +19,8 @@ def seed(path: Path) -> None:
         ("profile", "p", "r", "Roadmap", None, "draft", None, "a", "a", 1, 1),
     )
     conn.execute(
-        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("profile", "p", "r", 1, "draft", "seed", None, "a", 1, None),
+        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("profile", "p", "r", 1, "draft", None, "seed", None, "a", 1, None),
     )
     conn.commit()
     conn.close()
@@ -573,7 +573,7 @@ def test_planning_rules_rpc_returns_version_and_rules_no_scope(tmp_path, monkeyp
     # Global rules: no profile/project/roadmap scope required at all.
     _prepare(tmp_path, monkeypatch)
     response = server._methods["roadmaps.planning_rules"]("1", {})
-    assert response["result"]["version"] == "1.1"
+    assert response["result"]["version"] == "1.2"
     rules = response["result"]["rules"]
     assert isinstance(rules["prompt"], str)
     assert "json" in rules["prompt"].lower()

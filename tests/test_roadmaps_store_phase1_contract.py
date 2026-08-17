@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS roadmap_versions (
     roadmap_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
     version INTEGER NOT NULL CHECK (version >= 1),
     state TEXT NOT NULL CHECK (state IN ('draft','proposed','validated','superseded','archived')),
+    title TEXT,
     source TEXT,
     reason TEXT,
     created_by TEXT NOT NULL CHECK (length(trim(replace(replace(replace(created_by, char(9), ''), char(10), ''), char(13), ''))) > 0),
@@ -182,7 +183,7 @@ _SCHEMA_CONTRACT = {
     "roadmap_versions": {
         "columns": (("profile_id", "TEXT", 1, 1), ("project_id", "TEXT", 1, 2),
                     ("roadmap_id", "TEXT", 1, 3), ("version", "INTEGER", 1, 4),
-                    ("state", "TEXT", 1, 0), ("source", "TEXT", 0, 0), ("reason", "TEXT", 0, 0),
+                    ("state", "TEXT", 1, 0), ("title", "TEXT", 0, 0), ("source", "TEXT", 0, 0), ("reason", "TEXT", 0, 0),
                     ("created_by", "TEXT", 1, 0), ("created_at", "INTEGER", 1, 0),
                     ("content_hash", "TEXT", 0, 0)),
         "fks": (("roadmaps", ("profile_id", "project_id", "roadmap_id"),
@@ -327,8 +328,8 @@ def seed_scope(conn: sqlite3.Connection, profile: str = "profile-a", project: st
         (profile, project, "roadmap-a", "Roadmap", None, "draft", None, "test", "test", 1, 1),
     )
     conn.execute(
-        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (profile, project, "roadmap-a", 1, "draft", "test", None, "test", 1, None),
+        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (profile, project, "roadmap-a", 1, "draft", None, "test", None, "test", 1, None),
     )
     conn.execute(
         "INSERT INTO roadmap_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -440,8 +441,8 @@ def test_active_version_must_reference_same_roadmap_version(tmp_path: Path) -> N
     )
     # The pointer may precede its version inside one transaction.
     conn.execute(
-        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("profile-a", "project-a", "r", 1, "draft", "test", None, "actor", 1, None),
+        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("profile-a", "project-a", "r", 1, "draft", None, "test", None, "actor", 1, None),
     )
     assert conn.execute("SELECT active_version FROM roadmaps").fetchone()[0] == 1
     conn.commit()
@@ -481,8 +482,8 @@ def test_active_version_cannot_be_satisfied_by_other_scope(
         "UPDATE roadmaps SET active_version=1 WHERE profile_id='profile-a' AND project_id='project-a' AND roadmap_id='roadmap-a'"
     )
     conn.execute(
-        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (*other_scope, 1, "draft", "test", None, "actor", 1, None),
+        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (*other_scope, 1, "draft", None, "test", None, "actor", 1, None),
     )
     with pytest.raises(sqlite3.IntegrityError):
         conn.commit()

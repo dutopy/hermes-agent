@@ -63,13 +63,10 @@
     }
   },
   "tabs": [
-    { "id": "thread", "label": "Thread", "codicon": "list-ordered" },
-    { "id": "board", "label": "Board", "codicon": "project" },
-    { "id": "map", "label": "Map", "codicon": "graph" },
     { "id": "plan", "label": "Plan", "codicon": "versions" },
-    { "id": "milestones", "label": "Milestones", "codicon": "milestone" },
-    { "id": "decisions", "label": "Decisions", "codicon": "checklist" },
-    { "id": "files", "label": "Files", "codicon": "files" }
+    { "id": "team", "label": "Team", "codicon": "person" },
+    { "id": "readiness", "label": "Readiness", "codicon": "pass-filled" },
+    { "id": "map", "label": "Map", "codicon": "graph" }
   ],
   "codicons": [
     "account",
@@ -92,6 +89,7 @@
     "hourglass",
     "info",
     "list-ordered",
+    "lock",
     "milestone",
     "pass-filled",
     "person",

@@ -366,6 +366,7 @@ def _admin_handle(rid, params: dict, *, operation: str) -> dict:
                 version=params.get("version"), nodes=params.get("nodes"),
                 relations=params.get("relations"), todos=params.get("todos"),
                 source=params.get("source"), reason=params.get("reason"),
+                title=params.get("title"),
             )
         elif operation == "plans.activate":
             result = writer.activate_plan(

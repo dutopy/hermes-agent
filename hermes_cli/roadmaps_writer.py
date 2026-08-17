@@ -1195,6 +1195,7 @@ class RoadmapsWriter:
         todos: Any = None,
         source: Any = None,
         reason: Any = None,
+        title: Any = None,
     ) -> dict[str, Any]:
         """Create a full plan version atomically (nodes + relations + todos).
 
@@ -1213,6 +1214,7 @@ class RoadmapsWriter:
             version = _int_in_range(version, "version", 1, MAX_VERSION)
         source = _optional_text(source, "source", max_length=MAX_IDENTIFIER_LENGTH)
         reason = _optional_text(reason, "reason", max_length=MAX_REASON_LENGTH)
+        title = _optional_text(title, "title", max_length=MAX_IDENTIFIER_LENGTH)
         nodes = _validate_plan_nodes(nodes)
         node_ids = {node["node_id"] for node in nodes}
         relations = _validate_plan_relations(relations, node_ids)
@@ -1253,10 +1255,10 @@ class RoadmapsWriter:
                 content_hash = self._content_hash(nodes, relations, todos)
                 conn.execute(
                     "INSERT INTO roadmap_versions "
-                    "(profile_id, project_id, roadmap_id, version, state, source, "
+                    "(profile_id, project_id, roadmap_id, version, state, title, source, "
                     "reason, created_by, created_at, content_hash) "
-                    "VALUES (?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?)",
-                    (profile_id, project_id, roadmap_id, version, source, reason,
+                    "VALUES (?, ?, ?, ?, 'proposed', ?, ?, ?, ?, ?, ?)",
+                    (profile_id, project_id, roadmap_id, version, title, source, reason,
                      actor, now, content_hash),
                 )
                 for node in _parents_first(nodes):

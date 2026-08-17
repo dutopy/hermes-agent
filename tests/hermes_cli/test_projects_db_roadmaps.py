@@ -46,8 +46,8 @@ def _seed(conn: sqlite3.Connection, profile: str = "profile-a", project: str = "
         (profile, project, "roadmap-a", "Roadmap", None, "draft", None, "actor", "actor", 1, 1),
     )
     conn.execute(
-        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (profile, project, "roadmap-a", 1, "draft", "test", None, "actor", 1, None),
+        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (profile, project, "roadmap-a", 1, "draft", None, "test", None, "actor", 1, None),
     )
     conn.execute(
         "INSERT INTO roadmap_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

@@ -29,6 +29,7 @@ import { notify, notifyError } from '@/store/notifications'
 import { $activeGatewayProfile, ensureGatewayProfile, newSessionInProfile, setShowAllProfiles } from '@/store/profile'
 import { $activeSessionId, $currentCwd, $currentModel, $gatewayState } from '@/store/session'
 import { runGatewayRestart } from '@/store/system-actions'
+import { $activeProjectId } from '@/store/projects'
 
 // -- state: readonly views over the app's live atoms -------------------------
 
@@ -86,6 +87,8 @@ export const host = {
   state: {
     /** Runtime id of the active chat session (null on a fresh draft). */
     activeSessionId: readonlyAtom<null | string>($activeSessionId),
+    /** Id of the active project in the sidebar (null when none). */
+    activeProjectId: readonlyAtom<null | string>($activeProjectId),
     /** Active workspace cwd ('' when detached). */
     cwd: readonlyAtom<string>($currentCwd),
     /** Gateway socket state: 'idle' | 'connecting' | 'open' | …. */

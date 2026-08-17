@@ -8,22 +8,22 @@
  */
 
 // src/index.js
-import { useCallback as useCallback9, useMemo as useMemo8, useState as useState7 } from "react";
-import { jsx as jsx14, jsxs as jsxs11 } from "react/jsx-runtime";
+import { useCallback as useCallback8, useEffect as useEffect6, useMemo as useMemo7, useState as useState10 } from "react";
+import { jsx as jsx14, jsxs as jsxs14 } from "react/jsx-runtime";
 import {
-  Badge as Badge2,
-  Button as Button6,
-  Codicon as Codicon10,
+  Badge as Badge3,
+  Button as Button10,
+  Codicon as Codicon13,
   CopyButton as CopyButton4,
-  EmptyState as EmptyState9,
-  ErrorState as ErrorState2,
+  EmptyState as EmptyState8,
+  ErrorState as ErrorState4,
   ROUTES_AREA,
   ScrollArea,
   SIDEBAR_NAV_AREA,
-  Skeleton as Skeleton2,
+  Skeleton as Skeleton4,
   StatusDot as StatusDot7,
-  cn as cn8,
-  host as host6,
+  cn as cn7,
+  host as host7,
   useValue as useValue2
 } from "@hermes/plugin-sdk";
 
@@ -93,13 +93,10 @@ var config_default = {
     }
   },
   tabs: [
-    { id: "thread", label: "Thread", codicon: "list-ordered" },
-    { id: "board", label: "Board", codicon: "project" },
-    { id: "map", label: "Map", codicon: "graph" },
     { id: "plan", label: "Plan", codicon: "versions" },
-    { id: "milestones", label: "Milestones", codicon: "milestone" },
-    { id: "decisions", label: "Decisions", codicon: "checklist" },
-    { id: "files", label: "Files", codicon: "files" }
+    { id: "team", label: "Team", codicon: "person" },
+    { id: "readiness", label: "Readiness", codicon: "pass-filled" },
+    { id: "map", label: "Map", codicon: "graph" }
   ],
   codicons: [
     "account",
@@ -122,6 +119,7 @@ var config_default = {
     "hourglass",
     "info",
     "list-ordered",
+    "lock",
     "milestone",
     "pass-filled",
     "person",
@@ -159,7 +157,12 @@ var RPC = {
   roadmap_sessions: "roadmaps.sessions",
   attach_session: "roadmaps.attach_session",
   plans_create: "plans.create",
-  plans_activate: "plans.activate"
+  plans_activate: "plans.activate",
+  plans_check: "plans.check",
+  team_list: "team.list",
+  team_check: "team.check",
+  readiness_list: "readiness.list",
+  readiness_check: "readiness.check"
 };
 var NODE_ORDER = config_default.states.order;
 var ERROR_GUIDANCE = {
@@ -290,49 +293,6 @@ function assertActor(actor) {
   }
   return sent;
 }
-async function roadmapCreate(profile, projectId, title, actor) {
-  const scope = assertRoadmapScope(profile, projectId, null);
-  const sent = String(title ?? "").trim();
-  if (!validateRoadmapTitle(sent)) {
-    throw localValidationError("Roadmap title must be non-empty, at most 200 characters, and free of control characters.");
-  }
-  const sentActor = assertActor(actor);
-  return host.request(RPC.roadmaps_create, {
-    profile: scope.profile,
-    project_id: scope.projectId,
-    title: sent,
-    actor: sentActor
-  });
-}
-async function roadmapUpdate(profile, projectId, roadmapId, expectedVersion, title, actor) {
-  const scope = assertRoadmapScope(profile, projectId, roadmapId);
-  const expected = assertExpectedVersion(expectedVersion);
-  const sent = String(title ?? "").trim();
-  if (!validateRoadmapTitle(sent)) {
-    throw localValidationError("Roadmap title must be non-empty, at most 200 characters, and free of control characters.");
-  }
-  const sentActor = assertActor(actor);
-  return host.request(RPC.roadmaps_update, {
-    profile: scope.profile,
-    project_id: scope.projectId,
-    roadmap_id: scope.roadmapId,
-    expected_version: expected,
-    title: sent,
-    actor: sentActor
-  });
-}
-async function roadmapArchive(profile, projectId, roadmapId, expectedVersion, actor) {
-  const scope = assertRoadmapScope(profile, projectId, roadmapId);
-  const expected = assertExpectedVersion(expectedVersion);
-  const sentActor = assertActor(actor);
-  return host.request(RPC.roadmaps_archive, {
-    profile: scope.profile,
-    project_id: scope.projectId,
-    roadmap_id: scope.roadmapId,
-    expected_version: expected,
-    actor: sentActor
-  });
-}
 async function getPlanningRules() {
   const res = await host.request(RPC.planning_rules, {});
   if (!res || typeof res.rules?.prompt !== "string" || res.rules.prompt.trim() === "") {
@@ -395,6 +355,8 @@ async function createPlan(profile, projectId, roadmapId, payload, actor) {
   const reason = typeof payload?.reason === "string" && payload.reason.trim() !== "" ? payload.reason.trim() : void 0;
   if (source) params.source = source;
   if (reason) params.reason = reason;
+  const title = typeof payload?.title === "string" && payload.title.trim() !== "" ? payload.title.trim() : void 0;
+  if (title) params.title = title;
   return host.request(RPC.plans_create, params);
 }
 async function activatePlan(profile, projectId, roadmapId, version, expectedVersion, actor) {
@@ -518,9 +480,6 @@ function mapRelations(version, { includeInactive = false } = {}) {
 function planVersions(snapshot) {
   const versions = snapshot?.roadmap?.versions ?? [];
   return [...versions].sort((a, b) => (Number(b.version) || 0) - (Number(a.version) || 0));
-}
-function milestoneNodes(version) {
-  return (version?.nodes ?? []).filter((n) => n.kind === "milestone" || n.kind === "objective").sort((a, b) => String(a.node_id).localeCompare(String(b.node_id)));
 }
 function depsSatisfied(node, version) {
   const byId = new Map((version?.nodes ?? []).map((n) => [n.node_id, n]));
@@ -651,36 +610,46 @@ function criticalChain(version) {
   }
   return chain;
 }
-function groupMilestones(version) {
-  const nodes = milestoneNodes(version);
-  const byId = new Map((version?.nodes ?? []).map((n) => [n.node_id, n]));
-  const groups = /* @__PURE__ */ new Map();
-  const flat = [];
-  for (const n of nodes) {
-    const parent = n.parent_node_id ? byId.get(n.parent_node_id) ?? null : null;
-    if (parent) {
-      const arr = groups.get(parent.node_id) ?? [];
-      arr.push(n);
-      groups.set(parent.node_id, arr);
-    } else {
-      flat.push(n);
-    }
+
+// src/state.js
+import { useCallback, useEffect as useEffect2, useMemo, useRef, useState as useState2 } from "react";
+import { host as host2, useQuery } from "@hermes/plugin-sdk";
+
+// src/persist.js
+import { useEffect, useState } from "react";
+function read(key, initialValue) {
+  try {
+    const raw = globalThis.localStorage?.getItem(key);
+    return raw != null ? JSON.parse(raw) : initialValue;
+  } catch {
+    return initialValue;
   }
-  const entries = [...groups.entries()].map(([parentId, groupNodes]) => ({
-    label: nodeLabel(byId.get(parentId)),
-    nodes: groupNodes
-  }));
-  if (flat.length > 0) entries.push({ label: null, nodes: flat });
-  return entries;
+}
+function write(key, value) {
+  const store = globalThis.localStorage;
+  if (!store) return;
+  try {
+    store.setItem(key, JSON.stringify(value));
+  } catch {
+    return;
+  }
+}
+function usePersistedState(key, initialValue) {
+  const [value, setValue] = useState(() => read(key, initialValue));
+  useEffect(() => {
+    setValue(read(key, initialValue));
+  }, [key, initialValue]);
+  useEffect(() => {
+    write(key, value);
+  }, [key, value]);
+  return [value, setValue];
 }
 
 // src/state.js
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { host as host2, useQuery } from "@hermes/plugin-sdk";
 function useLayoutMode(initialWidth) {
   const containerRef = useRef(null);
-  const [containerWidth, setContainerWidth] = useState(initialWidth);
-  useEffect(() => {
+  const [containerWidth, setContainerWidth] = useState2(initialWidth);
+  useEffect2(() => {
     const el = containerRef.current;
     const RO = globalThis.ResizeObserver;
     if (!el || typeof RO !== "function") return;
@@ -744,9 +713,66 @@ function useRoadmapBoard(profile, projectId, roadmapId, enabled) {
     refetchInterval: config_default.query.boardRefetchMs
   });
 }
-function useScopeState(projects, roadmaps) {
-  const [projectId, setProjectId] = useState("");
-  const [roadmapId, setRoadmapId] = useState("");
+function useRoadmapPlanBattery(profile, projectId, roadmapId, version, enabled) {
+  return useQuery({
+    queryKey: [ID, "plan-battery", profile, projectId, roadmapId, version],
+    queryFn: async () => host2.request(RPC.plans_check, { profile, project_id: projectId, roadmap_id: roadmapId, version }),
+    enabled,
+    refetchInterval: config_default.query.boardRefetchMs
+  });
+}
+function useRoadmapTeamBattery(profile, projectId, roadmapId, version, enabled) {
+  return useQuery({
+    queryKey: [ID, "team-battery", profile, projectId, roadmapId, version],
+    queryFn: async () => host2.request(RPC.team_check, { profile, project_id: projectId, roadmap_id: roadmapId, version }),
+    enabled,
+    refetchInterval: config_default.query.boardRefetchMs
+  });
+}
+function useRoadmapReadinessBattery(profile, projectId, roadmapId, version, enabled) {
+  return useQuery({
+    queryKey: [ID, "readiness-battery", profile, projectId, roadmapId, version],
+    queryFn: async () => host2.request(RPC.readiness_check, { profile, project_id: projectId, roadmap_id: roadmapId, version }),
+    enabled,
+    refetchInterval: config_default.query.boardRefetchMs
+  });
+}
+function useRoadmapTeam(profile, projectId, roadmapId, version, enabled) {
+  return useQuery({
+    queryKey: [ID, "team", profile, projectId, roadmapId, version],
+    queryFn: async () => {
+      const [team, battery] = await Promise.all([
+        host2.request(RPC.team_list, { profile, project_id: projectId, roadmap_id: roadmapId, version }),
+        host2.request(RPC.team_check, { profile, project_id: projectId, roadmap_id: roadmapId, version })
+      ]);
+      if (!assertResponseScope(team, { profile, projectId, roadmapId })) {
+        throw Object.assign(new Error("Response out of scope"), { code: 5063 });
+      }
+      return { workers: team.workers ?? [], assignments: team.assignments ?? [], battery: battery ?? { ok: false, failures: [] } };
+    },
+    enabled,
+    refetchInterval: config_default.query.boardRefetchMs
+  });
+}
+function useRoadmapReadiness(profile, projectId, roadmapId, version, enabled) {
+  return useQuery({
+    queryKey: [ID, "readiness", profile, projectId, roadmapId, version],
+    queryFn: async () => {
+      const [rd, battery] = await Promise.all([
+        host2.request(RPC.readiness_list, { profile, project_id: projectId, roadmap_id: roadmapId, version }),
+        host2.request(RPC.readiness_check, { profile, project_id: projectId, roadmap_id: roadmapId, version })
+      ]);
+      if (!assertResponseScope(rd, { profile, projectId, roadmapId })) {
+        throw Object.assign(new Error("Response out of scope"), { code: 5063 });
+      }
+      return { items: rd.items ?? [], battery: battery ?? { ok: false, failures: [] } };
+    },
+    enabled,
+    refetchInterval: config_default.query.boardRefetchMs
+  });
+}
+function useScopeState(profile, projects, roadmaps) {
+  const [projectId, setProjectId] = usePersistedState(`roadmaps:${profile}:projectId`, "");
   const projectItems = useMemo(() => projectSelectorItems(projects), [projects]);
   const projectIds = useMemo(() => projectItems.map((p) => p.id), [projectItems]);
   const projectNameById = useMemo(() => {
@@ -758,20 +784,18 @@ function useScopeState(projects, roadmaps) {
     () => projectId === "" ? [] : roadmapSelectorItems(roadmaps, projectId),
     [roadmaps, projectId]
   );
-  useEffect(() => {
+  const roadmapId = roadmapOptions.length > 0 ? roadmapOptions[0].roadmap_id : "";
+  useEffect2(() => {
     if (projectId !== "" && !projectIds.includes(projectId)) setProjectId("");
   }, [projectIds, projectId]);
-  useEffect(() => {
-    if (roadmapId !== "" && !roadmapOptions.some((r) => r.roadmap_id === roadmapId)) setRoadmapId("");
-  }, [roadmapOptions, roadmapId]);
-  return { projectId, setProjectId, roadmapId, setRoadmapId, projectNameById, projects: projectItems, roadmapOptions };
+  return { projectId, setProjectId, roadmapId, projectNameById, projects: projectItems, roadmapOptions };
 }
 function useNodeSelection(scopeIdentity, version) {
-  const [selectedNodeId, setSelectedNodeId] = useState("");
-  useEffect(() => {
+  const [selectedNodeId, setSelectedNodeId] = useState2("");
+  useEffect2(() => {
     setSelectedNodeId("");
   }, scopeIdentity);
-  useEffect(() => {
+  useEffect2(() => {
     if (selectedNodeId !== "" && version && !version.nodes.some((n) => n.node_id === selectedNodeId)) {
       setSelectedNodeId("");
     }
@@ -781,24 +805,14 @@ function useNodeSelection(scopeIdentity, version) {
   }, []);
   return { selectedNodeId, setSelectedNodeId, onSelect };
 }
-function deriveProductState(snapshot) {
-  if (snapshot == null) return "NO_PROJECT";
-  if (snapshot.found !== true || !snapshot.roadmap) return "NO_ROADMAP";
-  const roadmap = snapshot.roadmap;
-  if (roadmap.active_version != null) return "ACTIVE";
-  const versions = Array.isArray(roadmap.versions) ? roadmap.versions : [];
-  if (versions.some((v) => v?.state === "validated")) return "VALIDATED_NON_ACTIVE";
-  if (versions.some((v) => v?.state === "proposed")) return "PROPOSED";
-  return "DRAFT_NO_PLAN";
-}
 
 // src/scope.js
-import { useState as useState3 } from "react";
+import { useState as useState4 } from "react";
 import { jsx as jsx2, jsxs as jsxs2 } from "react/jsx-runtime";
-import { Button as Button2, Codicon as Codicon2, CopyButton as CopyButton2, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tip, useQueryClient as useQueryClient2 } from "@hermes/plugin-sdk";
+import { Button as Button2, Codicon as Codicon2, CopyButton as CopyButton2, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Tip } from "@hermes/plugin-sdk";
 
 // src/scope-actions.js
-import { useCallback as useCallback2, useState as useState2 } from "react";
+import { useCallback as useCallback2, useState as useState3 } from "react";
 import { jsx, jsxs } from "react/jsx-runtime";
 import {
   Button,
@@ -827,9 +841,9 @@ function FormError({ error }) {
   });
 }
 function ProjectCreateForm({ onCreated, onCancel }) {
-  const [name, setName] = useState2("");
-  const [busy, setBusy] = useState2(false);
-  const [error, setError] = useState2(null);
+  const [name, setName] = useState3("");
+  const [busy, setBusy] = useState3(false);
+  const [error, setError] = useState3(null);
   const queryClient = useQueryClient();
   const submit = useCallback2(async () => {
     if (busy) return;
@@ -890,9 +904,9 @@ function ProjectCreateForm({ onCreated, onCancel }) {
   });
 }
 function ProjectRenameForm({ projectId, currentName, onRenamed, onCancel }) {
-  const [name, setName] = useState2(currentName);
-  const [busy, setBusy] = useState2(false);
-  const [error, setError] = useState2(null);
+  const [name, setName] = useState3(currentName);
+  const [busy, setBusy] = useState3(false);
+  const [error, setError] = useState3(null);
   const queryClient = useQueryClient();
   const submit = useCallback2(async () => {
     if (busy) return;
@@ -953,8 +967,8 @@ function ProjectRenameForm({ projectId, currentName, onRenamed, onCancel }) {
   });
 }
 function ProjectMenu({ projectId, projectName, onRequestRename, onArchived }) {
-  const [confirmOpen, setConfirmOpen] = useState2(false);
-  const [busy, setBusy] = useState2(false);
+  const [confirmOpen, setConfirmOpen] = useState3(false);
+  const [busy, setBusy] = useState3(false);
   const queryClient = useQueryClient();
   const archive = useCallback2(async () => {
     if (busy) return;
@@ -1027,256 +1041,29 @@ function ProjectMenu({ projectId, projectName, onRequestRename, onArchived }) {
     ]
   });
 }
-function RoadmapCreateForm({ profile, projectId, actor, onCreated, onCancel }) {
-  const [title, setTitle] = useState2("");
-  const [busy, setBusy] = useState2(false);
-  const [error, setError] = useState2(null);
-  const queryClient = useQueryClient();
-  const submit = useCallback2(async () => {
-    if (busy) return;
-    const trimmed = title.trim();
-    if (!validateRoadmapTitle(trimmed)) {
-      setError({
-        code: null,
-        hint: "Roadmap title must be non-empty, at most 200 characters, and free of control characters."
-      });
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await roadmapCreate(profile, projectId, trimmed, actor);
-      await queryClient.invalidateQueries({ queryKey: [ID, "list", profile] });
-      const createdId = res?.roadmap_id ?? res?.scope?.roadmap_id ?? "";
-      host3.notify({ kind: "success", title: "Roadmap created", message: `Created "${trimmed}".` });
-      onCreated(createdId);
-    } catch (err) {
-      setError({ code: rpcError(err).code, hint: err?.hint });
-    } finally {
-      setBusy(false);
-    }
-  }, [actor, busy, onCreated, profile, projectId, queryClient, title]);
-  return jsxs("div", {
-    className: "flex flex-col gap-1 px-0.5",
-    children: [
-      jsxs("div", {
-        className: "flex items-center gap-1.5",
-        children: [
-          jsx(Input, {
-            value: title,
-            onChange: (ev) => setTitle(ev.target.value),
-            onKeyDown: (ev) => {
-              if (ev.key === "Enter") void submit();
-              if (ev.key === "Escape") onCancel();
-            },
-            placeholder: "Roadmap title\u2026",
-            autoFocus: true,
-            disabled: busy,
-            className: "h-6 w-48 px-1.5 text-xs",
-            "aria-label": "New roadmap title"
-          }),
-          jsx(Button, {
-            type: "button",
-            size: "xs",
-            variant: "secondary",
-            onClick: () => void submit(),
-            disabled: busy || title.trim() === "",
-            children: "Create"
-          }),
-          jsx(Button, {
-            type: "button",
-            size: "xs",
-            variant: "ghost",
-            onClick: onCancel,
-            disabled: busy,
-            children: "Cancel"
-          })
-        ]
-      }),
-      jsx(FormError, { error })
-    ]
-  });
-}
-function RoadmapRenameForm({ profile, projectId, roadmapId, currentTitle, expectedVersion, actor, onRenamed, onCancel }) {
-  const [title, setTitle] = useState2(currentTitle);
-  const [busy, setBusy] = useState2(false);
-  const [error, setError] = useState2(null);
-  const queryClient = useQueryClient();
-  const submit = useCallback2(async () => {
-    if (busy) return;
-    const trimmed = title.trim();
-    if (!validateRoadmapTitle(trimmed)) {
-      setError({
-        code: null,
-        hint: "Roadmap title must be non-empty, at most 200 characters, and free of control characters."
-      });
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await roadmapUpdate(profile, projectId, roadmapId, expectedVersion, trimmed, actor);
-      await queryClient.invalidateQueries({ queryKey: [ID, "list", profile] });
-      host3.notify({ kind: "success", title: "Roadmap renamed", message: `Renamed to "${trimmed}".` });
-      onRenamed();
-    } catch (err) {
-      setError({ code: rpcError(err).code, hint: err?.hint });
-    } finally {
-      setBusy(false);
-    }
-  }, [actor, busy, expectedVersion, onRenamed, profile, projectId, queryClient, roadmapId, title]);
-  return jsxs("div", {
-    className: "flex flex-col gap-1 px-0.5",
-    children: [
-      jsxs("div", {
-        className: "flex items-center gap-1.5",
-        children: [
-          jsx(Input, {
-            value: title,
-            onChange: (ev) => setTitle(ev.target.value),
-            onKeyDown: (ev) => {
-              if (ev.key === "Enter") void submit();
-              if (ev.key === "Escape") onCancel();
-            },
-            placeholder: "Roadmap title\u2026",
-            autoFocus: true,
-            disabled: busy,
-            className: "h-6 w-48 px-1.5 text-xs",
-            "aria-label": "Rename roadmap"
-          }),
-          jsx(Button, {
-            type: "button",
-            size: "xs",
-            variant: "secondary",
-            onClick: () => void submit(),
-            disabled: busy || title.trim() === "",
-            children: "Save"
-          }),
-          jsx(Button, {
-            type: "button",
-            size: "xs",
-            variant: "ghost",
-            onClick: onCancel,
-            disabled: busy,
-            children: "Cancel"
-          })
-        ]
-      }),
-      jsx(FormError, { error })
-    ]
-  });
-}
-function RoadmapMenu({ profile, projectId, roadmapId, roadmapTitle, expectedVersion, actor, onRequestRename, onArchived }) {
-  const [confirmOpen, setConfirmOpen] = useState2(false);
-  const [busy, setBusy] = useState2(false);
-  const queryClient = useQueryClient();
-  const archive = useCallback2(async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await roadmapArchive(profile, projectId, roadmapId, expectedVersion, actor);
-      await queryClient.invalidateQueries({ queryKey: [ID, "list", profile] });
-      setConfirmOpen(false);
-      host3.notify({ kind: "success", title: "Roadmap archived", message: `Archived "${roadmapTitle}".` });
-      onArchived();
-    } catch (err) {
-      const ec = mutationErrorCopy({ code: rpcError(err).code });
-      throw new Error(ec.hint);
-    } finally {
-      setBusy(false);
-    }
-  }, [actor, busy, expectedVersion, onArchived, profile, projectId, queryClient, roadmapId, roadmapTitle]);
-  const hasRoadmap = roadmapId !== "";
-  return jsxs("div", {
-    className: "flex items-center gap-1.5",
-    children: [
-      jsx(DropdownMenu, {
-        children: [
-          jsx(DropdownMenuTrigger, {
-            asChild: true,
-            children: jsx(Button, {
-              type: "button",
-              variant: "ghost",
-              size: "icon-xs",
-              className: "data-[state=open]:bg-(--ui-control-active-background) data-[state=open]:text-foreground",
-              "aria-label": "Roadmap actions",
-              disabled: !hasRoadmap,
-              children: jsx(Codicon, { name: "ellipsis", size: "0.8rem" })
-            })
-          }),
-          jsx(DropdownMenuContent, {
-            align: "end",
-            sideOffset: 4,
-            className: "w-44",
-            children: [
-              jsx(DropdownMenuItem, {
-                onSelect: onRequestRename,
-                disabled: !hasRoadmap,
-                children: [jsx(Codicon, { name: "edit", size: "0.75rem" }), "Rename"]
-              }),
-              jsx(CopyButton, { appearance: "menu-item", text: roadmapId, label: "Copy ID", disabled: !hasRoadmap }),
-              jsx(DropdownMenuSeparator, {}),
-              jsx(DropdownMenuItem, {
-                variant: "destructive",
-                disabled: !hasRoadmap,
-                onSelect: () => setConfirmOpen(true),
-                children: [jsx(Codicon, { name: "archive", size: "0.75rem" }), "Archive"]
-              })
-            ]
-          })
-        ]
-      }),
-      jsx(ConfirmDialog, {
-        open: confirmOpen,
-        onClose: () => {
-          if (!busy) setConfirmOpen(false);
-        },
-        onConfirm: archive,
-        title: "Archive roadmap",
-        description: `Archive "${roadmapTitle}"? The roadmap leaves the selector; its versions stay on the backend.`,
-        confirmLabel: "Archive",
-        cancelLabel: "Cancel",
-        destructive: true
-      })
-    ]
-  });
-}
 
 // src/scope.js
 function ScopeBar({
   profile,
   projectId,
   setProjectId,
-  roadmapId,
-  setRoadmapId,
   setSelectedNodeId,
   projects,
   projectNameById,
-  roadmapOptions,
   compact,
   roadmapsCount,
   projectsError,
   onRetryProjects,
-  actor
+  follow,
+  onToggleFollow
 }) {
-  const [projectCreateOpen, setProjectCreateOpen] = useState3(false);
-  const [projectRenameOpen, setProjectRenameOpen] = useState3(false);
-  const [roadmapCreateOpen, setRoadmapCreateOpen] = useState3(false);
-  const [roadmapRenameOpen, setRoadmapRenameOpen] = useState3(false);
-  const queryClient = useQueryClient2();
+  const [projectCreateOpen, setProjectCreateOpen] = useState4(false);
+  const [projectRenameOpen, setProjectRenameOpen] = useState4(false);
   const selectProject = (v) => {
     setProjectId(v);
-    setRoadmapId("");
-    setSelectedNodeId("");
-  };
-  const selectRoadmap = (v) => {
-    setRoadmapId(v);
     setSelectedNodeId("");
   };
   const currentName = projectNameById.get(projectId) || projectId;
-  const selectedRoadmap = roadmapOptions.find((r) => r.roadmap_id === roadmapId) ?? null;
-  const roadmapTitle = selectedRoadmap?.title || roadmapId;
-  const roadmapActiveVersion = Number(selectedRoadmap?.active_version) || 0;
   return jsxs2("div", {
     className: "flex flex-col gap-1",
     children: [
@@ -1309,6 +1096,17 @@ function ScopeBar({
                     children: projects.length === 0 ? jsx2(SelectItem, { value: "__none__", disabled: true, children: "No projects" }) : projects.map((p) => jsx2(SelectItem, { value: p.id, children: p.name || p.id }, p.id))
                   })
                 ]
+              }),
+              // follow toggle — track the app's active project (sidebar).
+              jsx2(Button2, {
+                type: "button",
+                variant: "ghost",
+                size: "icon-xs",
+                "aria-label": follow ? "Stop following active project" : "Follow active project",
+                title: follow ? "Stop following the active project" : "Follow the active project",
+                onClick: onToggleFollow,
+                className: follow ? "text-primary" : "text-(--ui-text-tertiary)",
+                children: jsx2(Codicon2, { name: "arrow-right", size: "0.8rem" })
               }),
               // "+" — inline create form (projects.create).
               jsx2(Button2, {
@@ -1348,71 +1146,6 @@ function ScopeBar({
               jsx2(Button2, { type: "button", size: "xs", variant: "ghost", onClick: onRetryProjects, children: "Retry" })
             ]
           }) : null,
-          jsxs2("div", {
-            className: "flex items-center gap-1",
-            children: [
-              jsxs2("span", { className: "text-[0.625rem] text-(--ui-text-tertiary)", children: ["Roadmap"] }),
-              jsx2(Select, {
-                value: roadmapId,
-                onValueChange: selectRoadmap,
-                disabled: projectId === "",
-                children: [
-                  jsx2(SelectTrigger, {
-                    className: "h-7 w-48 text-xs",
-                    "aria-label": "Roadmap",
-                    children: jsx2(SelectValue, { placeholder: projectId === "" ? "\u2014" : "select\u2026" })
-                  }),
-                  jsx2(SelectContent, {
-                    children: roadmapOptions.length === 0 ? jsx2(SelectItem, { value: "__none__", disabled: true, children: "No roadmaps" }) : roadmapOptions.map(
-                      (r) => jsx2(
-                        SelectItem,
-                        {
-                          value: r.roadmap_id,
-                          children: jsx2("span", {
-                            className: "block min-w-0 truncate",
-                            children: r.title || r.roadmap_id
-                          })
-                        },
-                        r.roadmap_id
-                      )
-                    )
-                  })
-                ]
-              }),
-              // "+" — inline roadmap create form (roadmaps.create, T5b).
-              jsx2(Button2, {
-                type: "button",
-                variant: "ghost",
-                size: "icon-xs",
-                "aria-label": "Create roadmap",
-                disabled: projectId === "",
-                onClick: () => setRoadmapCreateOpen((v) => !v),
-                children: jsx2(Codicon2, { name: "add", size: "0.8rem" })
-              }),
-              // "⋮" — roadmap management menu (rename / archive / copy id).
-              jsx2(RoadmapMenu, {
-                profile,
-                projectId,
-                roadmapId,
-                roadmapTitle,
-                expectedVersion: roadmapActiveVersion,
-                actor,
-                onRequestRename: () => setRoadmapRenameOpen(true),
-                onArchived: () => {
-                  setRoadmapRenameOpen(false);
-                  setRoadmapCreateOpen(false);
-                }
-              }),
-              roadmapId !== "" ? jsx2(CopyButton2, {
-                appearance: "icon",
-                buttonSize: "icon-xs",
-                buttonVariant: "ghost",
-                text: roadmapId,
-                title: "Copy roadmap ID",
-                label: "Copy roadmap ID"
-              }) : null
-            ]
-          }),
           compact ? null : jsx2("span", {
             className: "ml-auto text-[0.625rem] text-(--ui-text-tertiary)",
             children: `${plural(roadmapsCount, "roadmap")} \xB7 profile ${profile}`
@@ -1425,29 +1158,6 @@ function ScopeBar({
         currentName,
         onRenamed: () => setProjectRenameOpen(false),
         onCancel: () => setProjectRenameOpen(false)
-      }) : null,
-      roadmapCreateOpen ? jsx2(RoadmapCreateForm, {
-        profile,
-        projectId,
-        actor,
-        onCreated: (id) => {
-          selectRoadmap(id);
-          setRoadmapCreateOpen(false);
-        },
-        onCancel: () => setRoadmapCreateOpen(false)
-      }) : null,
-      roadmapRenameOpen ? jsx2(RoadmapRenameForm, {
-        profile,
-        projectId,
-        roadmapId,
-        currentTitle: roadmapTitle,
-        expectedVersion: roadmapActiveVersion,
-        actor,
-        onRenamed: () => {
-          setRoadmapRenameOpen(false);
-          void queryClient.invalidateQueries({ queryKey: [ID, "steer"] });
-        },
-        onCancel: () => setRoadmapRenameOpen(false)
       }) : null
     ]
   });
@@ -1486,6 +1196,36 @@ function NodeStateTag({ state }) {
   return jsxs3("span", {
     className: "inline-flex items-center gap-1 text-[0.625rem] text-(--ui-text-tertiary)",
     children: [jsx3(StatusDot, { tone: NODE_TONE[state] ?? "muted" }), NODE_STATE_LABEL[state] ?? state]
+  });
+}
+function BatteryBadge({ battery, label }) {
+  const failures = battery?.failures ?? [];
+  const ok = battery?.ok === true;
+  const count = failures.length;
+  return jsxs3("div", {
+    className: "flex flex-col gap-1 px-0.5",
+    children: [
+      jsxs3("span", {
+        className: "inline-flex items-center gap-1.5 text-[0.625rem]",
+        children: [
+          jsx3(StatusDot, { tone: ok ? "good" : "bad" }),
+          jsx3("span", { className: "text-(--ui-text-secondary)", children: label }),
+          jsx3("span", {
+            className: ok ? "text-(--ui-text-quaternary)" : "text-destructive",
+            children: ok ? "ready" : `${count} ${count === 1 ? "failure" : "failures"}`
+          })
+        ]
+      }),
+      count === 0 ? null : jsxs3("div", {
+        className: "flex flex-col gap-0.5 pl-3.5",
+        children: failures.map(
+          (f) => jsxs3("div", { className: "flex flex-col", children: [
+            jsx3("span", { className: "font-mono text-[0.625rem] text-destructive", children: f.code }),
+            f.hint ? jsx3("span", { className: "text-[0.625rem] text-(--ui-text-tertiary)", children: f.hint }) : null
+          ] }, f.code)
+        )
+      })
+    ]
   });
 }
 
@@ -1744,167 +1484,114 @@ function ThreadView({ version, selectedId, onSelect, compact, dense }) {
 }
 
 // src/views/map.js
-import { useCallback as useCallback4, useMemo as useMemo4, useState as useState4 } from "react";
-import { jsx as jsx6, jsxs as jsxs6 } from "react/jsx-runtime";
-import { Codicon as Codicon5, EmptyState as EmptyState2, cn as cn3 } from "@hermes/plugin-sdk";
-var RELATION_LABEL = config_default.relation.label;
-var RELATION_ICON = config_default.relation.icon;
-function RelationRow({ rel, selectedNodeId, onSelect }) {
-  const onFrom = useCallback4(() => onSelect(rel.from_node_id), [rel.from_node_id, onSelect]);
-  const onTo = useCallback4(() => onSelect(rel.to_node_id), [rel.to_node_id, onSelect]);
-  return jsxs6("div", {
-    className: cn3(
-      "grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 px-2 py-1.5 text-xs transition-colors",
-      (rel.from_node_id === selectedNodeId || rel.to_node_id === selectedNodeId) && "bg-primary/[0.04]"
-    ),
-    children: [
-      jsxs6("button", {
-        type: "button",
-        onClick: onFrom,
-        className: cn3("min-w-0 truncate text-left hover:underline", rel.from_node_id === selectedNodeId ? "text-primary" : "text-foreground"),
-        children: nodeLabel(rel.from)
-      }),
-      jsxs6("span", {
-        className: "flex shrink-0 items-center gap-1 text-[0.625rem] uppercase tracking-wide text-(--ui-text-tertiary)",
-        children: [jsx6(Codicon5, { name: RELATION_ICON[rel.kind] ?? "arrow-right", size: "0.65rem" }), RELATION_LABEL[rel.kind] ?? rel.kind]
-      }),
-      jsxs6("button", {
-        type: "button",
-        onClick: onTo,
-        className: cn3("min-w-0 truncate text-right hover:underline", rel.to_node_id === selectedNodeId ? "text-primary" : "text-foreground"),
-        children: nodeLabel(rel.to)
-      })
-    ]
-  });
-}
-function MapView({ version, selectedId, onSelect }) {
-  const [showInactive, setShowInactive] = useState4(false);
-  const rels = useMemo4(() => mapRelations(version, { includeInactive: showInactive }), [version, showInactive]);
-  return jsxs6("div", {
-    className: "flex flex-col gap-1.5",
-    children: [
-      jsxs6(SectionTitle, {
-        right: jsx6("button", {
-          type: "button",
-          onClick: () => setShowInactive((v) => !v),
-          className: "rounded-[3px] px-1 text-[0.625rem] normal-case tracking-normal text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground",
-          children: showInactive ? "active only" : "include inactive"
-        }),
-        children: ["Relations", ` (${rels.length})`]
-      }),
-      rels.length === 0 ? jsx6(EmptyState2, {
-        title: showInactive ? "No relations" : "No active relations",
-        description: "Each row is a canonical relation (depends on, blocks) of the active version."
-      }) : jsxs6("div", {
-        className: "flex flex-col divide-y divide-(--ui-stroke-tertiary)",
-        children: rels.map((r) => jsx6(RelationRow, { rel: r, selectedNodeId: selectedId, onSelect }, r.relation_id))
-      })
-    ]
-  });
-}
+import { useCallback as useCallback5, useMemo as useMemo4, useState as useState5 } from "react";
+import { jsx as jsx7, jsxs as jsxs7 } from "react/jsx-runtime";
+import { Codicon as Codicon6, EmptyState as EmptyState3, cn as cn4 } from "@hermes/plugin-sdk";
 
 // src/views/board.js
-import { useCallback as useCallback5 } from "react";
-import { jsx as jsx7, jsxs as jsxs7 } from "react/jsx-runtime";
-import { Button as Button3, Codicon as Codicon6, EmptyState as EmptyState3, ErrorState, Skeleton, StatusDot as StatusDot4, cn as cn4 } from "@hermes/plugin-sdk";
+import { useCallback as useCallback4 } from "react";
+import { jsx as jsx6, jsxs as jsxs6 } from "react/jsx-runtime";
+import { Button as Button3, Codicon as Codicon5, EmptyState as EmptyState2, ErrorState, Skeleton, StatusDot as StatusDot4, cn as cn3 } from "@hermes/plugin-sdk";
 var CARD_TONE = config_default.board.cardTone;
 function CardTag({ card }) {
   if (!card || card.found !== true) {
-    return jsx7("span", {
+    return jsx6("span", {
       className: "inline-flex items-center text-[0.625rem] text-(--ui-text-quaternary)",
       children: "no card"
     });
   }
-  return jsxs7("span", {
+  return jsxs6("span", {
     className: "inline-flex items-center gap-1 text-[0.625rem] text-(--ui-text-tertiary)",
-    children: [jsx7(StatusDot4, { tone: CARD_TONE[card.status] ?? "muted" }), jsx7("span", { children: card.status })]
+    children: [jsx6(StatusDot4, { tone: CARD_TONE[card.status] ?? "muted" }), jsx6("span", { children: card.status })]
   });
 }
 function WorkerTag({ worker }) {
   if (!worker) return null;
   const label = worker.lane ? worker.model ? `${worker.lane} \xB7 ${worker.model}` : worker.lane : worker.worker_id;
-  return jsxs7("span", {
+  return jsxs6("span", {
     className: "inline-flex min-w-0 items-center gap-1 text-[0.625rem] text-(--ui-text-tertiary)",
-    children: [jsx7(Codicon6, { name: "person", size: "0.65rem" }), jsx7("span", { className: "truncate", children: label })]
+    children: [jsx6(Codicon5, { name: "person", size: "0.65rem" }), jsx6("span", { className: "truncate", children: label })]
   });
 }
 function TodoRow({ todo }) {
-  return jsxs7("div", {
+  return jsxs6("div", {
     className: "flex flex-col gap-0.5 py-0.5",
     children: [
-      jsxs7("div", {
+      jsxs6("div", {
         className: "flex flex-wrap items-center gap-x-2 gap-y-0.5",
         children: [
-          jsx7("span", { className: "min-w-0 flex-1 truncate text-xs", children: todo.todo.title }),
-          jsx7(CardTag, { card: todo.card }),
-          jsx7(WorkerTag, { worker: todo.worker })
+          jsx6("span", { className: "min-w-0 flex-1 truncate text-xs", children: todo.todo.title }),
+          jsx6(CardTag, { card: todo.card }),
+          jsx6(WorkerTag, { worker: todo.worker })
         ]
       }),
-      todo.todo.acceptance ? jsx7("div", { className: "truncate text-[0.625rem] text-(--ui-text-quaternary)", children: todo.todo.acceptance }) : null
+      todo.todo.acceptance ? jsx6("div", { className: "truncate text-[0.625rem] text-(--ui-text-quaternary)", children: todo.todo.acceptance }) : null
     ]
   });
 }
 function PhaseGroup({ phase, selectedId, onSelect }) {
-  const onClick = useCallback5(() => onSelect(phase.node_id), [phase.node_id, onSelect]);
-  return jsxs7("div", {
+  const onClick = useCallback4(() => onSelect(phase.phase.node_id), [phase.phase.node_id, onSelect]);
+  return jsxs6("div", {
     className: "flex flex-col border-l border-(--ui-stroke-tertiary) pl-2",
     children: [
-      jsxs7("button", {
+      jsxs6("button", {
         type: "button",
         onClick,
-        className: cn4(
+        className: cn3(
           "flex items-center gap-1.5 px-1 py-1 text-left transition-colors",
-          phase.node_id === selectedId ? "text-primary" : "text-(--ui-text-secondary) hover:text-foreground"
+          phase.phase.node_id === selectedId ? "text-primary" : "text-(--ui-text-secondary) hover:text-foreground"
         ),
         children: [
-          jsx7(Codicon6, { name: "chevron-right", size: "0.65rem", className: "shrink-0" }),
-          jsx7("span", { className: "min-w-0 flex-1 truncate text-xs", children: nodeLabel(phase) }),
-          jsx7(NodeStateTag, { state: phase.state })
+          jsx6(Codicon5, { name: "chevron-right", size: "0.65rem", className: "shrink-0" }),
+          jsx6("span", { className: "min-w-0 flex-1 truncate text-xs", children: nodeLabel(phase.phase) }),
+          jsx6(NodeStateTag, { state: phase.phase.state })
         ]
       }),
-      phase.todos.length === 0 ? jsx7("div", { className: "px-3 py-0.5 text-[0.625rem] text-(--ui-text-quaternary)", children: "No todos" }) : jsx7("div", {
+      phase.todos.length === 0 ? jsx6("div", { className: "px-3 py-0.5 text-[0.625rem] text-(--ui-text-quaternary)", children: "No todos" }) : jsx6("div", {
         className: "flex flex-col pl-4",
-        children: phase.todos.map((t) => jsx7(TodoRow, { todo: t }, t.todo.todo_id))
+        children: phase.todos.map((t) => jsx6(TodoRow, { todo: t }, t.todo.todo_id))
       })
     ]
   });
 }
 function MilestoneGroup({ milestone, selectedId, onSelect }) {
-  const onClick = useCallback5(() => onSelect(milestone.node_id), [milestone.node_id, onSelect]);
-  return jsxs7("div", {
+  const onClick = useCallback4(() => onSelect(milestone.milestone.node_id), [milestone.milestone.node_id, onSelect]);
+  return jsxs6("div", {
     className: "flex flex-col",
     children: [
-      jsxs7("button", {
+      jsxs6("button", {
         type: "button",
         onClick,
-        className: cn4(
+        className: cn3(
           "flex items-center gap-2 px-1 py-1.5 text-left transition-colors",
-          milestone.node_id === selectedId ? "bg-primary/[0.06]" : "hover:bg-(--chrome-action-hover)"
+          milestone.milestone.node_id === selectedId ? "bg-primary/[0.06]" : "hover:bg-(--chrome-action-hover)"
         ),
         children: [
-          jsx7(Codicon6, { name: "milestone", size: "0.7rem", className: "shrink-0 text-(--ui-text-tertiary)" }),
-          jsx7("span", { className: "min-w-0 flex-1 truncate text-xs font-medium", children: nodeLabel(milestone) }),
-          jsx7(NodeStateTag, { state: milestone.state })
+          jsx6(Codicon5, { name: "milestone", size: "0.7rem", className: "shrink-0 text-(--ui-text-tertiary)" }),
+          jsx6("span", { className: "min-w-0 flex-1 truncate text-xs font-medium", children: nodeLabel(milestone.milestone) }),
+          jsx6(NodeStateTag, { state: milestone.milestone.state })
         ]
       }),
-      milestone.phases.length === 0 ? jsx7("div", { className: "px-2 py-0.5 text-[0.625rem] text-(--ui-text-quaternary)", children: "No phases" }) : jsx7("div", {
+      milestone.phases.length === 0 ? jsx6("div", { className: "px-2 py-0.5 text-[0.625rem] text-(--ui-text-quaternary)", children: "No phases" }) : jsx6("div", {
         className: "flex flex-col gap-1 pl-3",
-        children: milestone.phases.map((p) => jsx7(PhaseGroup, { phase: p.phase, selectedId, onSelect }, p.phase.node_id))
+        children: milestone.phases.map((p) => jsx6(PhaseGroup, { phase: p, selectedId, onSelect }, p.phase.node_id))
       })
     ]
   });
 }
 function BoardView({ scope, selectedId, onSelect }) {
   const query = useRoadmapBoard(scope.profile, scope.projectId, scope.roadmapId, true);
+  const boardVersion = query.data?.version ?? null;
+  const planBattery = useRoadmapPlanBattery(scope.profile, scope.projectId, scope.roadmapId, boardVersion, boardVersion != null);
   if (query.isLoading) {
-    return jsx7(Skeleton, { className: "h-24 w-full" });
+    return jsx6(Skeleton, { className: "h-24 w-full" });
   }
   if (query.isError) {
     const err = errorCopy(query.error);
-    return jsx7(ErrorState, {
+    return jsx6(ErrorState, {
       title: "Board unavailable",
       description: `${err.hint}${err.code != null ? ` (code ${err.code})` : ""}`,
-      children: jsx7(Button3, {
+      children: jsx6(Button3, {
         type: "button",
         size: "xs",
         variant: "secondary",
@@ -1915,13 +1602,13 @@ function BoardView({ scope, selectedId, onSelect }) {
   }
   const board = query.data;
   if (!board || board.found !== true) {
-    return jsx7(EmptyState3, {
+    return jsx6(EmptyState2, {
       title: "No roadmap for this scope",
       description: "The board is unavailable for the selected roadmap."
     });
   }
   if (board.version == null) {
-    return jsx7(EmptyState3, {
+    return jsx6(EmptyState2, {
       title: "No active version",
       description: "This roadmap has no active version to display."
     });
@@ -1929,84 +1616,309 @@ function BoardView({ scope, selectedId, onSelect }) {
   const milestones = board.milestones ?? [];
   const objective = board.objective;
   const todoCount = milestones.reduce((n, m) => n + m.phases.reduce((p, ph) => p + ph.todos.length, 0), 0);
+  return jsxs6("div", {
+    className: "flex flex-col gap-2",
+    children: [
+      jsx6(SectionTitle, {
+        right: jsx6("span", { className: "tabular-nums text-(--ui-text-quaternary)", children: plural(todoCount, "todo") }),
+        children: "Cartography"
+      }),
+      jsx6(BatteryBadge, { battery: planBattery.data, label: "Plan battery" }),
+      objective ? jsxs6("div", {
+        className: "flex flex-col gap-0.5 rounded-[3px] border border-(--ui-stroke-tertiary) px-2 py-1.5",
+        children: [
+          jsxs6("div", {
+            className: "flex items-center gap-2",
+            children: [
+              jsx6(Codicon5, { name: "target", size: "0.7rem", className: "shrink-0 text-(--ui-text-tertiary)" }),
+              jsx6("span", { className: "min-w-0 flex-1 truncate text-xs font-medium", children: nodeLabel(objective) }),
+              jsx6(NodeStateTag, { state: objective.state })
+            ]
+          }),
+          objective.description ? jsx6("div", { className: "truncate text-[0.625rem] text-(--ui-text-tertiary)", children: objective.description }) : null
+        ]
+      }) : null,
+      milestones.length === 0 ? jsx6(EmptyState2, {
+        title: "No milestones",
+        description: "The active version contains no milestones to display."
+      }) : jsx6("div", {
+        className: "flex flex-col divide-y divide-(--ui-stroke-tertiary)",
+        children: milestones.map((m) => jsx6(MilestoneGroup, { milestone: m, selectedId, onSelect }, m.milestone.node_id))
+      })
+    ]
+  });
+}
+
+// src/views/map.js
+var RELATION_LABEL = config_default.relation.label;
+var RELATION_ICON = config_default.relation.icon;
+function RelationRow({ rel, selectedNodeId, onSelect }) {
+  const onFrom = useCallback5(() => onSelect(rel.from_node_id), [rel.from_node_id, onSelect]);
+  const onTo = useCallback5(() => onSelect(rel.to_node_id), [rel.to_node_id, onSelect]);
+  return jsxs7("div", {
+    className: cn4(
+      "grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 px-2 py-1.5 text-xs transition-colors",
+      (rel.from_node_id === selectedNodeId || rel.to_node_id === selectedNodeId) && "bg-primary/[0.04]"
+    ),
+    children: [
+      jsxs7("button", {
+        type: "button",
+        onClick: onFrom,
+        className: cn4("min-w-0 truncate text-left hover:underline", rel.from_node_id === selectedNodeId ? "text-primary" : "text-foreground"),
+        children: nodeLabel(rel.from)
+      }),
+      jsxs7("span", {
+        className: "flex shrink-0 items-center gap-1 text-[0.625rem] uppercase tracking-wide text-(--ui-text-tertiary)",
+        children: [jsx7(Codicon6, { name: RELATION_ICON[rel.kind] ?? "arrow-right", size: "0.65rem" }), RELATION_LABEL[rel.kind] ?? rel.kind]
+      }),
+      jsxs7("button", {
+        type: "button",
+        onClick: onTo,
+        className: cn4("min-w-0 truncate text-right hover:underline", rel.to_node_id === selectedNodeId ? "text-primary" : "text-foreground"),
+        children: nodeLabel(rel.to)
+      })
+    ]
+  });
+}
+function MapView({ version, selectedId, onSelect, scope }) {
+  const [showInactive, setShowInactive] = useState5(false);
+  const rels = useMemo4(() => mapRelations(version, { includeInactive: showInactive }), [version, showInactive]);
   return jsxs7("div", {
     className: "flex flex-col gap-2",
     children: [
-      jsx7(SectionTitle, {
-        right: jsx7("span", { className: "tabular-nums text-(--ui-text-quaternary)", children: plural(todoCount, "todo") }),
-        children: "Board"
-      }),
-      objective ? jsxs7("div", {
-        className: "flex flex-col gap-0.5 rounded-[3px] border border-(--ui-stroke-tertiary) px-2 py-1.5",
+      jsx7(BoardView, { scope, selectedId, onSelect }),
+      jsxs7("div", {
+        className: "flex flex-col gap-1.5",
         children: [
-          jsxs7("div", {
-            className: "flex items-center gap-2",
-            children: [
-              jsx7(Codicon6, { name: "target", size: "0.7rem", className: "shrink-0 text-(--ui-text-tertiary)" }),
-              jsx7("span", { className: "min-w-0 flex-1 truncate text-xs font-medium", children: nodeLabel(objective) }),
-              jsx7(NodeStateTag, { state: objective.state })
-            ]
+          jsxs7(SectionTitle, {
+            right: jsx7("button", {
+              type: "button",
+              onClick: () => setShowInactive((v) => !v),
+              className: "rounded-[3px] px-1 text-[0.625rem] normal-case tracking-normal text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground",
+              children: showInactive ? "active only" : "include inactive"
+            }),
+            children: ["Relations", ` (${rels.length})`]
           }),
-          objective.description ? jsx7("div", { className: "truncate text-[0.625rem] text-(--ui-text-tertiary)", children: objective.description }) : null
+          rels.length === 0 ? jsx7(EmptyState3, {
+            title: showInactive ? "No relations" : "No active relations",
+            description: "Each row is a canonical relation (depends on, blocks) of the active version."
+          }) : jsxs7("div", {
+            className: "flex flex-col divide-y divide-(--ui-stroke-tertiary)",
+            children: rels.map((r) => jsx7(RelationRow, { rel: r, selectedNodeId: selectedId, onSelect }, r.relation_id))
+          })
         ]
-      }) : null,
-      milestones.length === 0 ? jsx7(EmptyState3, {
-        title: "No milestones",
-        description: "The active version contains no milestones to display."
-      }) : jsx7("div", {
-        className: "flex flex-col divide-y divide-(--ui-stroke-tertiary)",
-        children: milestones.map((m) => jsx7(MilestoneGroup, { milestone: m, selectedId, onSelect }, m.milestone.node_id))
       })
     ]
   });
 }
 
 // src/views/plan.js
-import { useCallback as useCallback6, useEffect as useEffect2, useMemo as useMemo5, useState as useState5 } from "react";
+import { useCallback as useCallback6, useEffect as useEffect4, useState as useState8 } from "react";
+import { jsx as jsx10, jsxs as jsxs10 } from "react/jsx-runtime";
+import { Badge as Badge2, Button as Button6, Codicon as Codicon9, EmptyState as EmptyState4, cn as cn5, host as host5, useQueryClient as useQueryClient2, useValue } from "@hermes/plugin-sdk";
+
+// src/views/vision.js
+import { useState as useState6 } from "react";
 import { jsx as jsx8, jsxs as jsxs8 } from "react/jsx-runtime";
-import { Badge, Button as Button4, Codicon as Codicon7, EmptyState as EmptyState4, cn as cn5, host as host4, useQueryClient as useQueryClient3, useValue } from "@hermes/plugin-sdk";
+import * as SDK from "@hermes/plugin-sdk";
+import { Button as Button4, Codicon as Codicon7 } from "@hermes/plugin-sdk";
+var SessionSurface2 = SDK.SessionSurface;
+function VisionLane({ session, collapsible = true }) {
+  const [collapsed, setCollapsed] = useState6(false);
+  if (typeof SessionSurface2 !== "function") {
+    return jsx8("div", { className: "flex min-h-0 flex-1 flex-col" });
+  }
+  if (collapsible && collapsed) {
+    return jsx8(Button4, {
+      type: "button",
+      variant: "ghost",
+      size: "xs",
+      onClick: () => setCollapsed(false),
+      className: "justify-start gap-1 self-start",
+      children: [jsx8(Codicon7, { name: "chevron-right", size: "0.7rem" }), "Vision"]
+    });
+  }
+  return jsxs8("div", {
+    className: "flex min-h-0 flex-1 flex-col",
+    children: [
+      collapsible ? jsxs8("div", {
+        className: "flex items-center justify-between gap-2 border-b border-(--ui-stroke-tertiary) px-0.5 py-0.5",
+        children: [
+          jsx8("span", { className: "text-[0.625rem] font-medium uppercase tracking-wide text-(--ui-text-tertiary)", children: "Vision" }),
+          jsx8(Button4, {
+            type: "button",
+            variant: "ghost",
+            size: "xs",
+            onClick: () => setCollapsed(true),
+            title: "Collapse the Vision chat",
+            className: "gap-1",
+            children: jsx8(Codicon7, { name: "arrow-down", size: "0.7rem" })
+          })
+        ]
+      }) : null,
+      jsx8(SessionSurface2, { session })
+    ]
+  });
+}
+
+// src/views/plan-draft.js
+import { useEffect as useEffect3, useMemo as useMemo5, useState as useState7 } from "react";
+import { jsx as jsx9, jsxs as jsxs9 } from "react/jsx-runtime";
+import { Badge, Button as Button5, Codicon as Codicon8, host as host4 } from "@hermes/plugin-sdk";
+function useVisionDraft(visionSid) {
+  const [draftText, setDraftText] = useState7("");
+  const [error, setError] = useState7(null);
+  useEffect3(() => {
+    if (!visionSid) return void 0;
+    const offDelta = host4.onEvent("message.delta", (ev) => {
+      if (ev.session_id !== visionSid) return;
+      const text = ev.payload?.text;
+      if (typeof text === "string" && text !== "") setDraftText((cur) => cur + text);
+    });
+    const offComplete = host4.onEvent("message.complete", (ev) => {
+      if (ev.session_id !== visionSid) return;
+      if (ev.payload?.status === "error") {
+        setError((cur) => cur || { code: null, hint: "The Vision session ended with an error before a plan draft was produced." });
+      }
+    });
+    return () => {
+      offDelta();
+      offComplete();
+    };
+  }, [visionSid]);
+  const preview = useMemo5(() => {
+    if (!draftText.trim()) return null;
+    const block = extractPlanJsonBlock(draftText);
+    return block ? planPreviewFromJson(block) : null;
+  }, [draftText]);
+  return { draftText, preview, error, reset: () => setDraftText("") };
+}
+var KIND_ICON = {
+  objective: "target",
+  milestone: "milestone",
+  phase: "chevron-right",
+  decision: "law"
+};
+function buildTree(nodes) {
+  const byId = /* @__PURE__ */ new Map();
+  for (const n of nodes) byId.set(n.node_id, { node: n, children: [] });
+  const roots = [];
+  for (const n of nodes) {
+    const entry = byId.get(n.node_id);
+    const parent = n.parent_node_id ? byId.get(n.parent_node_id) : null;
+    if (parent) parent.children.push(entry);
+    else roots.push(entry);
+  }
+  return roots;
+}
+function DraftNode({ node, children }) {
+  return jsxs9("div", {
+    className: "flex flex-col",
+    children: [
+      jsxs9("div", {
+        className: "flex items-center gap-1.5 px-1 py-0.5",
+        children: [
+          jsx9(Codicon8, { name: KIND_ICON[node.kind] ?? "circle-outline", size: "0.7rem", className: "shrink-0 text-(--ui-text-tertiary)" }),
+          jsx9("span", { className: "min-w-0 flex-1 truncate text-xs", children: node.title || node.node_id }),
+          node.kind ? jsx9(Badge, { size: "xs", variant: "outline", children: node.kind }) : null
+        ]
+      }),
+      children.length > 0 ? jsx9("div", {
+        className: "ml-2 flex flex-col border-l border-(--ui-stroke-tertiary) pl-3",
+        children: children.map((c) => jsx9(DraftNode, { node: c.node, children: c.children }, c.node.node_id))
+      }) : null
+    ]
+  });
+}
+function PlanDraftLive({ preview, draftText, activeSessionId, visionSid, saveBusy, onSave }) {
+  const hasPreview = preview !== null;
+  const roots = hasPreview ? buildTree(preview.nodes) : [];
+  return jsxs9("div", {
+    className: "flex min-h-0 flex-col gap-1",
+    children: [
+      jsx9(SectionTitle, {
+        right: jsx9(Button5, {
+          type: "button",
+          size: "xs",
+          variant: "secondary",
+          onClick: onSave,
+          disabled: !hasPreview || saveBusy,
+          className: "gap-1",
+          children: [jsx9(Codicon8, { name: "pass-filled", size: "0.7rem" }), saveBusy ? "Saving\u2026" : "Save plan"]
+        }),
+        children: "Plan draft"
+      }),
+      hasPreview ? jsxs9("div", {
+        className: "flex min-h-0 flex-col gap-1",
+        children: [
+          jsx9("div", { className: "truncate text-xs font-medium", children: preview.title || "Untitled plan" }),
+          jsx9("div", {
+            className: "flex flex-wrap items-center gap-1.5 text-[0.625rem] text-(--ui-text-quaternary)",
+            children: `${plural(preview.counts.nodes, "node")} \xB7 ${plural(preview.counts.relations, "relation")} \xB7 ${plural(preview.counts.todos, "todo")}`
+          }),
+          roots.length > 0 ? jsx9("div", {
+            className: "flex flex-col gap-0.5 overflow-auto",
+            children: roots.map((r) => jsx9(DraftNode, { node: r.node, children: r.children }, r.node.node_id))
+          }) : null
+        ]
+      }) : jsxs9("div", {
+        className: "flex items-center gap-1.5 text-[0.625rem] text-(--ui-text-tertiary)",
+        children: [
+          jsx9("span", {
+            className: "truncate",
+            children: activeSessionId === visionSid ? "Sculpting the plan in the Vision chat\u2026" : "Waiting for the Vision session to produce a plan draft\u2026"
+          }),
+          draftText ? jsx9("span", { className: "shrink-0 tabular-nums text-(--ui-text-quaternary)", children: `${draftText.length} chars` }) : null
+        ]
+      })
+    ]
+  });
+}
+
+// src/views/plan.js
 function VersionRow({ v, active, activating, onActivate }) {
   const isActive = v.version === active;
   const canActivate = v.state === "validated" && !isActive;
-  return jsxs8("div", {
+  return jsxs10("div", {
     className: "relative flex gap-3 px-0.5 py-1.5",
     children: [
-      jsx8("span", {
+      jsx10("span", {
         className: cn5("relative z-10 mt-1.5 size-2 shrink-0 rounded-full", isActive ? "bg-(--ui-accent)" : "bg-(--ui-stroke-secondary)")
       }),
-      jsxs8("div", {
+      jsxs10("div", {
         className: "min-w-0 flex-1",
         children: [
-          jsxs8("div", {
+          jsxs10("div", {
             className: "flex flex-wrap items-center gap-2",
             children: [
-              jsx8("span", {
-                className: cn5("font-mono text-xs", isActive ? "font-semibold text-foreground" : "text-(--ui-text-secondary)"),
-                children: `v${v.version}`
+              jsx10("span", {
+                className: cn5("min-w-0 truncate text-xs", isActive ? "font-semibold text-foreground" : "text-(--ui-text-secondary)"),
+                children: v.title || `v${v.version}`
               }),
-              isActive ? jsx8(Badge, { size: "xs", variant: "outline", children: "Active" }) : null,
-              jsx8("span", { className: "font-mono text-[0.625rem] uppercase text-(--ui-text-tertiary)", children: v.state }),
-              v.created_at ? jsx8("span", { className: "ml-auto text-[0.625rem] tabular-nums text-(--ui-text-quaternary)", children: formatDate(v.created_at) }) : null
+              jsx10("span", { className: "shrink-0 font-mono text-[0.625rem] text-(--ui-text-quaternary)", children: `v${v.version}` }),
+              isActive ? jsx10(Badge2, { size: "xs", variant: "outline", children: "Active" }) : null,
+              jsx10("span", { className: "font-mono text-[0.625rem] uppercase text-(--ui-text-tertiary)", children: v.state }),
+              v.created_at ? jsx10("span", { className: "ml-auto text-[0.625rem] tabular-nums text-(--ui-text-quaternary)", children: formatDate(v.created_at) }) : null
             ]
           }),
-          v.source ? jsxs8("div", {
+          v.source ? jsxs10("div", {
             className: "mt-0.5 flex min-w-0 items-center gap-1 text-[0.625rem] text-(--ui-text-tertiary)",
-            children: [jsx8("span", { className: "shrink-0 font-medium uppercase tracking-wide", children: "source" }), jsx8("span", { className: "truncate", children: v.source })]
+            children: [jsx10("span", { className: "shrink-0 font-medium uppercase tracking-wide", children: "source" }), jsx10("span", { className: "truncate", children: v.source })]
           }) : null,
-          v.reason ? jsx8("div", { className: "mt-0.5 line-clamp-2 text-[0.625rem] text-(--ui-text-tertiary)", children: v.reason }) : null,
-          canActivate ? jsxs8("div", {
+          v.reason ? jsx10("div", { className: "mt-0.5 line-clamp-2 text-[0.625rem] text-(--ui-text-tertiary)", children: v.reason }) : null,
+          canActivate ? jsxs10("div", {
             className: "mt-1 flex items-center gap-1.5",
             children: [
-              jsx8(Button4, {
+              jsx10(Button6, {
                 type: "button",
                 size: "xs",
                 variant: "secondary",
                 disabled: activating !== null,
                 onClick: () => onActivate(v.version),
                 className: "gap-1",
-                children: [jsx8(Codicon7, { name: "play", size: "0.7rem" }), activating === v.version ? "Activating\u2026" : "Activate"]
+                children: [jsx10(Codicon9, { name: "play", size: "0.7rem" }), activating === v.version ? "Activating\u2026" : "Activate"]
               }),
-              jsx8("span", { className: "text-[0.625rem] text-(--ui-text-quaternary)", children: "Supersedes the currently active version." })
+              jsx10("span", { className: "text-[0.625rem] text-(--ui-text-quaternary)", children: "Supersedes the currently active version." })
             ]
           }) : null
         ]
@@ -2014,106 +1926,38 @@ function VersionRow({ v, active, activating, onActivate }) {
     ]
   });
 }
-function VisionDraftCard({ preview, draftText, activeSessionId, visionSid, saveBusy, onSave }) {
-  const hasPreview = preview !== null;
-  return jsxs8("div", {
-    className: "rounded-[3px] border border-(--ui-stroke-tertiary) px-2 py-1.5",
-    children: [
-      jsx8(SectionTitle, {
-        right: jsx8(Button4, {
-          type: "button",
-          size: "xs",
-          variant: "secondary",
-          onClick: onSave,
-          disabled: !hasPreview || saveBusy,
-          className: "gap-1",
-          children: [jsx8(Codicon7, { name: "pass-filled", size: "0.7rem" }), saveBusy ? "Saving\u2026" : "Save plan"]
-        }),
-        children: "Vision draft"
-      }),
-      hasPreview ? jsxs8("div", {
-        className: "flex flex-col gap-1",
-        children: [
-          jsx8("div", { className: "truncate text-xs font-medium", children: preview.title || "Untitled plan" }),
-          preview.kinds.length > 0 ? jsxs8("div", {
-            className: "flex flex-wrap gap-1",
-            children: preview.kinds.map((k) => jsx8(Badge, { size: "xs", variant: "outline", children: k }, k))
-          }) : null,
-          jsx8("div", {
-            className: "flex flex-wrap items-center gap-1.5 text-[0.625rem] text-(--ui-text-quaternary)",
-            children: `${plural(preview.counts.nodes, "node")} \xB7 ${plural(preview.counts.relations, "relation")} \xB7 ${plural(preview.counts.todos, "todo")}`
-          })
-        ]
-      }) : jsxs8("div", {
-        className: "flex items-center gap-1.5 text-[0.625rem] text-(--ui-text-tertiary)",
-        children: [
-          jsx8("span", {
-            className: "truncate",
-            children: activeSessionId === visionSid ? "Drafting in the Vision chat\u2026" : "Waiting for the Vision session to produce a plan draft\u2026"
-          }),
-          draftText ? jsx8("span", { className: "shrink-0 tabular-nums text-(--ui-text-quaternary)", children: `${draftText.length} chars` }) : null
-        ]
-      })
-    ]
-  });
-}
 function PlanView({ snapshot, scope, actor, onMutated }) {
-  const queryClient = useQueryClient3();
+  const queryClient = useQueryClient2();
   const versions = planVersions(snapshot);
   const active = snapshot?.roadmap?.active_version;
-  const activeSessionId = useValue(host4.state.activeSessionId);
-  const [createBusy, setCreateBusy] = useState5(false);
-  const [visionSid, setVisionSid] = useState5(null);
-  const [draftText, setDraftText] = useState5("");
-  const [saveBusy, setSaveBusy] = useState5(false);
-  const [activating, setActivating] = useState5(null);
-  const [error, setError] = useState5(null);
+  const activeSessionId = useValue(host5.state.activeSessionId);
+  const [visionSession, setVisionSession] = useState8(null);
+  const [busy, setBusy] = useState8(false);
+  const [saveBusy, setSaveBusy] = useState8(false);
+  const [activating, setActivating] = useState8(null);
+  const [error, setError] = useState8(null);
+  const { draftText, preview, reset } = useVisionDraft(visionSession?.runtimeSessionId ?? null);
   const scopeKey = scope ? `${scope.profile}/${scope.projectId}/${scope.roadmapId}` : "";
-  useEffect2(() => {
-    setVisionSid(null);
-    setDraftText("");
+  useEffect4(() => {
+    setVisionSession(null);
     setError(null);
   }, [scopeKey]);
-  useEffect2(() => {
-    if (!visionSid) return void 0;
-    return host4.onEvent("message.delta", (ev) => {
-      if (ev.session_id !== visionSid) return;
-      const text = ev.payload?.text;
-      if (typeof text === "string" && text !== "") setDraftText((cur) => cur + text);
-    });
-  }, [visionSid]);
-  useEffect2(() => {
-    if (!visionSid) return void 0;
-    return host4.onEvent("message.complete", (ev) => {
-      if (ev.session_id !== visionSid) return;
-      if (ev.payload?.status === "error") {
-        setError(
-          (cur) => cur ? cur : { code: null, hint: "The Vision session ended with an error before a plan draft was produced. Try Create again." }
-        );
-      }
-    });
-  }, [visionSid]);
-  const preview = useMemo5(() => {
-    if (!draftText.trim()) return null;
-    const block = extractPlanJsonBlock(draftText);
-    return block ? planPreviewFromJson(block) : null;
-  }, [draftText]);
-  const startVision = useCallback6(async () => {
-    if (!scope || createBusy) return;
-    setCreateBusy(true);
+  const start = useCallback6(async () => {
+    if (!scope || busy) return;
+    setBusy(true);
     setError(null);
     try {
       const rules = await getPlanningRules();
-      const created = await visionSessionCreate(scope.profile, rules.rules.prompt);
-      setVisionSid(created.session_id);
-      setDraftText("");
-      await host4.openSession(created.stored_session_id, { profile: scope.profile });
+      const identity = await startVisionSession(scope.profile, rules.rules.prompt);
+      await attachVisionSession(scope.profile, scope.projectId, scope.roadmapId, identity.storedSessionId, active ?? 0, actor, null);
+      setVisionSession(identity);
+      host5.notify({ kind: "success", title: "Vision ready", message: "The Vision session is ready. Plan first, then propose the plan." });
     } catch (err) {
       setError({ code: rpcError(err).code });
     } finally {
-      setCreateBusy(false);
+      setBusy(false);
     }
-  }, [createBusy, scope]);
+  }, [active, actor, busy, scope]);
   const savePlan = useCallback6(async () => {
     if (!scope || !preview || saveBusy) return;
     setSaveBusy(true);
@@ -2127,6 +1971,7 @@ function PlanView({ snapshot, scope, actor, onMutated }) {
           nodes: preview.nodes,
           relations: preview.relations,
           todos: preview.todos,
+          title: preview.title,
           source: "vision",
           reason: "Draft created in the Vision session."
         },
@@ -2135,14 +1980,14 @@ function PlanView({ snapshot, scope, actor, onMutated }) {
       await queryClient.invalidateQueries({ queryKey: [ID, "list", scope.profile] });
       await queryClient.invalidateQueries({ queryKey: [ID, "steer", scope.profile, scope.projectId, scope.roadmapId] });
       if (onMutated) onMutated();
-      host4.notify({ kind: "success", title: "Plan saved", message: `Plan version saved (${preview.counts.nodes} nodes, ${preview.counts.relations} relations, ${preview.counts.todos} todos).` });
-      setDraftText("");
+      host5.notify({ kind: "success", title: "Plan saved", message: `Plan version saved (${preview.counts.nodes} nodes, ${preview.counts.relations} relations, ${preview.counts.todos} todos).` });
+      reset();
     } catch (err) {
       setError({ code: rpcError(err).code });
     } finally {
       setSaveBusy(false);
     }
-  }, [actor, onMutated, preview, queryClient, saveBusy, scope]);
+  }, [actor, onMutated, preview, queryClient, reset, saveBusy, scope]);
   const activate = useCallback6(
     async (version) => {
       if (!scope || activating !== null) return;
@@ -2154,7 +1999,7 @@ function PlanView({ snapshot, scope, actor, onMutated }) {
         await queryClient.invalidateQueries({ queryKey: [ID, "list", scope.profile] });
         await queryClient.invalidateQueries({ queryKey: [ID, "steer", scope.profile, scope.projectId, scope.roadmapId] });
         if (onMutated) onMutated();
-        host4.notify({ kind: "success", title: "Plan activated", message: `Version ${version} is now active.` });
+        host5.notify({ kind: "success", title: "Plan activated", message: `Version ${version} is now active.` });
       } catch (err) {
         setError({ code: rpcError(err).code });
       } finally {
@@ -2164,185 +2009,204 @@ function PlanView({ snapshot, scope, actor, onMutated }) {
     [activating, actor, onMutated, queryClient, scope, snapshot]
   );
   const ec = mutationErrorCopy(error);
-  return jsxs8("div", {
-    className: "flex flex-col gap-1.5",
+  return jsxs10("div", {
+    className: "flex min-h-0 flex-1 flex-col gap-2",
     children: [
-      jsxs8("div", {
+      visionSession ? jsxs10("div", {
+        className: "flex min-h-0 flex-1 gap-2",
+        children: [
+          jsx10("div", { className: "flex min-w-0 flex-1 flex-col", children: jsx10(VisionLane, { session: visionSession }) }),
+          jsx10("div", {
+            className: "flex w-[42%] min-w-0 flex-col overflow-auto border-l border-(--ui-stroke-tertiary) pl-2",
+            children: jsx10(PlanDraftLive, {
+              preview,
+              draftText,
+              activeSessionId,
+              visionSid: visionSession?.runtimeSessionId,
+              saveBusy,
+              onSave: () => void savePlan()
+            })
+          })
+        ]
+      }) : null,
+      error && ec ? jsxs10("div", {
+        className: "flex items-start gap-1.5 rounded-[3px] bg-destructive/10 px-2 py-1 text-xs text-destructive",
+        children: [
+          jsx10(Codicon9, { name: "error", size: "0.75rem", className: "mt-px shrink-0" }),
+          jsxs10("span", { children: [ec.hint, ec.code != null ? ` (code ${ec.code})` : ""] })
+        ]
+      }) : null,
+      jsxs10("div", {
         className: "flex items-center justify-between gap-2 px-0.5",
         children: [
-          jsx8(SectionTitle, {
-            right: jsx8("span", { className: "tabular-nums text-(--ui-text-quaternary)", children: plural(versions.length, "version") }),
-            children: "Plan history"
+          jsx10(SectionTitle, {
+            right: jsx10("span", { className: "tabular-nums text-(--ui-text-quaternary)", children: plural(versions.length, "version") }),
+            children: "Plan versions"
           }),
-          jsx8(Button4, {
+          jsx10(Button6, {
             type: "button",
             size: "xs",
-            variant: "secondary",
-            disabled: !scope || createBusy,
-            onClick: () => void startVision(),
-            title: "Open a Vision session seeded with the planning rules",
+            variant: visionSession ? "secondary" : "default",
+            disabled: !scope || busy,
+            onClick: () => void start(),
             className: "gap-1",
-            children: [jsx8(Codicon7, { name: "add", size: "0.7rem" }), createBusy ? "Starting\u2026" : "Create"]
+            children: [jsx10(Codicon9, { name: visionSession ? "debug-restart" : "add", size: "0.7rem" }), busy ? "Starting\u2026" : "Start planning"]
           })
         ]
       }),
-      visionSid ? jsx8(VisionDraftCard, { preview, draftText, activeSessionId, visionSid, saveBusy, onSave: () => void savePlan() }) : null,
-      error && ec ? jsxs8("div", {
-        className: "flex items-start gap-1.5 rounded-[3px] bg-destructive/10 px-2 py-1 text-xs text-destructive",
-        children: [
-          jsx8(Codicon7, { name: "error", size: "0.75rem", className: "mt-px shrink-0" }),
-          jsxs8("span", { children: [ec.hint, ec.code != null ? ` (code ${ec.code})` : ""] })
-        ]
-      }) : null,
-      versions.length === 0 ? jsx8(EmptyState4, {
+      versions.length === 0 ? jsx10(EmptyState4, {
         title: "No versions yet",
-        description: "Create a plan draft from a Vision session \u2014 the first published version lands here once saved."
-      }) : jsxs8("div", {
+        description: "Start a Vision session to draft the roadmap plan \u2014 the first published version lands here once saved."
+      }) : jsxs10("div", {
         className: "relative mt-1 flex flex-col",
         children: [
-          jsx8("span", { className: "absolute bottom-2 left-[3px] top-2 w-px bg-(--ui-stroke-tertiary)" }),
-          versions.map((v) => jsx8(VersionRow, { v, active, activating, onActivate: (version) => void activate(version) }, String(v.version)))
+          jsx10("span", { className: "absolute bottom-2 left-[3px] top-2 w-px bg-(--ui-stroke-tertiary)" }),
+          versions.map((v) => jsx10(VersionRow, { v, active, activating, onActivate: (version) => void activate(version) }, String(v.version)))
         ]
       })
     ]
   });
 }
 
-// src/views/milestones.js
-import { useCallback as useCallback7, useMemo as useMemo6 } from "react";
-import { jsx as jsx9, jsxs as jsxs9 } from "react/jsx-runtime";
-import { Codicon as Codicon8, EmptyState as EmptyState5, StatusDot as StatusDot5, cn as cn6 } from "@hermes/plugin-sdk";
-function MilestoneRow({ node, selected, onSelect, compact }) {
-  const onClick = useCallback7(() => onSelect(node.node_id), [node.node_id, onSelect]);
-  return jsxs9("button", {
-    type: "button",
-    onClick,
-    className: cn6(
-      "group flex w-full flex-col gap-1 px-2 py-1.5 text-left transition-colors",
-      selected ? "bg-primary/[0.06]" : "hover:bg-(--chrome-action-hover)"
-    ),
+// src/views/team.js
+import { jsx as jsx11, jsxs as jsxs11 } from "react/jsx-runtime";
+import { Button as Button7, Codicon as Codicon10, EmptyState as EmptyState5, ErrorState as ErrorState2, Skeleton as Skeleton2 } from "@hermes/plugin-sdk";
+function WorkerRow({ worker, todos }) {
+  const modelLabel = worker.model ? [worker.provider, worker.model].filter(Boolean).join("/") : worker.provider;
+  const meta = [modelLabel, worker.thinking_level ? `thinking ${worker.thinking_level}` : null].filter(Boolean);
+  const capabilities = [
+    worker.toolsets?.length ? `tools: ${worker.toolsets.join(", ")}` : null,
+    worker.skills?.length ? `skills: ${worker.skills.join(", ")}` : null
+  ].filter(Boolean);
+  return jsxs11("div", {
+    className: "flex flex-col gap-0.5 border-b border-(--ui-stroke-tertiary) py-1.5",
     children: [
-      jsxs9("div", {
-        className: "flex items-center gap-2",
+      jsxs11("div", {
+        className: "flex flex-wrap items-center gap-x-2 gap-y-0.5",
         children: [
-          jsx9(StatusDot5, { tone: NODE_TONE[node.state] ?? "muted" }),
-          jsx9("span", { className: "min-w-0 flex-1 truncate text-xs font-medium", children: nodeLabel(node) }),
-          !compact ? jsx9("span", { className: "font-mono text-[0.6rem] uppercase text-(--ui-text-quaternary)", children: node.kind }) : null,
-          !compact ? jsx9(NodeStateTag, { state: node.state }) : null
+          jsx11(Codicon10, { name: "person", size: "0.7rem", className: "shrink-0 text-(--ui-text-tertiary)" }),
+          jsx11("span", { className: "text-xs font-medium", children: worker.lane || worker.worker_id }),
+          meta.length ? jsx11("span", { className: "font-mono text-[0.625rem] text-(--ui-text-tertiary)", children: meta.join(" \xB7 ") }) : null,
+          jsx11("span", { className: "ml-auto text-[0.625rem] text-(--ui-text-quaternary)", children: plural(todos.length, "todo") })
         ]
       }),
-      jsxs9("div", {
-        className: "flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-3.5",
-        children: [
-          jsx9(ProgressBar, { value: node.progress }),
-          node.owner_agent ? jsxs9("span", {
-            className: "inline-flex min-w-0 items-center gap-1 truncate text-[0.625rem] text-(--ui-text-tertiary)",
-            children: [jsx9(Codicon8, { name: "person", size: "0.65rem" }), jsx9("span", { className: "truncate", children: node.owner_agent })]
-          }) : null
-        ]
-      })
+      capabilities.length ? jsx11("div", { className: "flex flex-wrap gap-x-2 text-[0.625rem] text-(--ui-text-quaternary)", children: capabilities.map((c) => jsx11("span", { children: c }, c)) }) : null
     ]
   });
 }
-function MilestonesView({ version, selectedId, onSelect, compact }) {
-  const nodes = useMemo6(() => milestoneNodes(version), [version]);
-  const groups = useMemo6(() => groupMilestones(version), [version]);
-  if (nodes.length === 0) {
-    return jsx9(EmptyState5, {
-      title: "No milestones",
-      description: "The active version contains no milestones or objectives."
+function TeamView({ scope, version }) {
+  const query = useRoadmapTeam(scope.profile, scope.projectId, scope.roadmapId, version, version != null);
+  if (version == null) {
+    return jsx11(EmptyState5, { title: "No active version", description: "This roadmap has no active version to team up." });
+  }
+  if (query.isLoading) {
+    return jsx11(Skeleton2, { className: "h-24 w-full" });
+  }
+  if (query.isError) {
+    const err = errorCopy(query.error);
+    return jsx11(ErrorState2, {
+      title: "Team unavailable",
+      description: `${err.hint}${err.code != null ? ` (code ${err.code})` : ""}`,
+      children: jsx11(Button7, { type: "button", size: "xs", variant: "secondary", onClick: () => void query.refetch(), children: "Retry" })
     });
   }
-  return jsxs9("div", {
+  const data = query.data ?? { workers: [], assignments: [], battery: { ok: false, failures: [] } };
+  const workers = data.workers;
+  const byWorker = /* @__PURE__ */ new Map();
+  for (const w of workers) byWorker.set(w.worker_id, []);
+  for (const a of data.assignments) {
+    if (byWorker.has(a.worker_id)) byWorker.get(a.worker_id).push(a.todo_id);
+  }
+  return jsxs11("div", {
     className: "flex flex-col gap-2",
     children: [
-      jsx9(SectionTitle, {
-        right: jsx9("span", { className: "tabular-nums text-(--ui-text-quaternary)", children: plural(nodes.length, "item") }),
-        children: "Milestones & objectives"
-      }),
-      groups.map(
-        (g, gi) => jsxs9(
-          "div",
-          {
-            className: "flex flex-col",
-            children: [
-              g.label ? jsxs9("div", {
-                className: "flex items-center gap-1 px-1 py-1 text-[0.625rem] font-medium uppercase tracking-wide text-(--ui-text-tertiary)",
-                children: [
-                  jsx9(Codicon8, { name: "milestone", size: "0.65rem" }),
-                  jsx9("span", { className: "truncate", children: g.label }),
-                  jsx9("span", { className: "tabular-nums text-(--ui-text-quaternary)", children: g.nodes.length })
-                ]
-              }) : null,
-              jsxs9("div", {
-                className: "flex flex-col divide-y divide-(--ui-stroke-tertiary)",
-                children: g.nodes.map((n) => jsx9(MilestoneRow, { node: n, selected: n.node_id === selectedId, onSelect, compact }, n.node_id))
-              })
-            ]
-          },
-          `group-${gi}`
-        )
-      )
+      jsx11(SectionTitle, { right: plural(workers.length, "worker"), children: "Team" }),
+      jsx11(BatteryBadge, { battery: data.battery, label: "Team battery" }),
+      workers.length === 0 ? jsx11(EmptyState5, { title: "No team", description: "No lane workers are assigned for this version yet." }) : jsx11("div", { className: "flex flex-col", children: workers.map((w) => jsx11(WorkerRow, { worker: w, todos: byWorker.get(w.worker_id) ?? [] }, w.worker_id)) })
     ]
   });
 }
 
-// src/views/decisions.js
-import { jsx as jsx10 } from "react/jsx-runtime";
-import { EmptyState as EmptyState6 } from "@hermes/plugin-sdk";
-function DecisionsView() {
-  return jsx10(EmptyState6, {
-    title: "No decisions recorded",
-    description: "Plan governance is coming (Phase 6) \u2014 proposing, validating, and revising a version will record each decision here."
+// src/views/readiness.js
+import { jsx as jsx12, jsxs as jsxs12 } from "react/jsx-runtime";
+import { Button as Button8, Codicon as Codicon11, EmptyState as EmptyState6, ErrorState as ErrorState3, Skeleton as Skeleton3, StatusDot as StatusDot5 } from "@hermes/plugin-sdk";
+var ITEM_TONE = { resolved: "good", verified: "good", open: "warn", missing: "bad", unresolved: "bad" };
+function ItemRow({ item }) {
+  const icon = item.kind === "blocker" ? "error" : "check";
+  const tone = ITEM_TONE[item.status] ?? "muted";
+  return jsxs12("div", {
+    className: "flex flex-col gap-0.5 border-b border-(--ui-stroke-tertiary) py-1.5",
+    children: [
+      jsxs12("div", {
+        className: "flex flex-wrap items-center gap-x-2 gap-y-0.5",
+        children: [
+          jsx12(Codicon11, { name: icon, size: "0.7rem", className: "shrink-0 text-(--ui-text-tertiary)" }),
+          jsx12("span", { className: "min-w-0 flex-1 truncate text-xs", children: item.title || item.item_id }),
+          jsx12("span", { className: "text-[0.625rem] text-(--ui-text-quaternary)", children: item.kind }),
+          jsxs12("span", {
+            className: "inline-flex items-center gap-1 text-[0.625rem] text-(--ui-text-tertiary)",
+            children: [jsx12(StatusDot5, { tone }), item.status ?? "\u2014"]
+          })
+        ]
+      }),
+      item.detail ? jsx12("div", { className: "truncate text-[0.625rem] text-(--ui-text-quaternary)", children: item.detail }) : null
+    ]
   });
 }
-
-// src/views/files.js
-import { jsx as jsx11 } from "react/jsx-runtime";
-import { EmptyState as EmptyState7 } from "@hermes/plugin-sdk";
-function FilesView() {
-  return jsx11(EmptyState7, {
-    title: "No attached files",
-    description: "Evidence is coming (Phase 5) \u2014 files linked to nodes and versions will be listed here."
-  });
-}
-
-// src/views/vision.js
-import { jsx as jsx12 } from "react/jsx-runtime";
-import { SessionSurface } from "@hermes/plugin-sdk";
-function VisionLane({ session }) {
-  return jsx12("div", {
-    className: "flex min-h-0 flex-1 flex-col",
-    children: jsx12(SessionSurface, { session })
+function ReadinessView({ scope, version }) {
+  const query = useRoadmapReadiness(scope.profile, scope.projectId, scope.roadmapId, version, version != null);
+  if (version == null) {
+    return jsx12(EmptyState6, { title: "No active version", description: "This roadmap has no active version to check readiness for." });
+  }
+  if (query.isLoading) {
+    return jsx12(Skeleton3, { className: "h-24 w-full" });
+  }
+  if (query.isError) {
+    const err = errorCopy(query.error);
+    return jsx12(ErrorState3, {
+      title: "Readiness unavailable",
+      description: `${err.hint}${err.code != null ? ` (code ${err.code})` : ""}`,
+      children: jsx12(Button8, { type: "button", size: "xs", variant: "secondary", onClick: () => void query.refetch(), children: "Retry" })
+    });
+  }
+  const data = query.data ?? { items: [], battery: { ok: false, failures: [] } };
+  const items = data.items;
+  return jsxs12("div", {
+    className: "flex flex-col gap-2",
+    children: [
+      jsx12(SectionTitle, { right: plural(items.length, "item"), children: "Readiness" }),
+      jsx12(BatteryBadge, { battery: data.battery, label: "Readiness battery" }),
+      items.length === 0 ? jsx12(EmptyState6, { title: "No readiness items", description: "No blockers or authorizations are recorded for this version yet." }) : jsx12("div", { className: "flex flex-col", children: items.map((it) => jsx12(ItemRow, { item: it }, it.item_id)) })
+    ]
   });
 }
 
 // src/inspector.js
-import { useCallback as useCallback8, useEffect as useEffect3, useMemo as useMemo7, useState as useState6 } from "react";
-import { jsx as jsx13, jsxs as jsxs10 } from "react/jsx-runtime";
-import { Button as Button5, Codicon as Codicon9, CopyButton as CopyButton3, EmptyState as EmptyState8, Input as Input2, Separator, StatusDot as StatusDot6, cn as cn7, host as host5 } from "@hermes/plugin-sdk";
+import { useCallback as useCallback7, useEffect as useEffect5, useMemo as useMemo6, useState as useState9 } from "react";
+import { jsx as jsx13, jsxs as jsxs13 } from "react/jsx-runtime";
+import { Button as Button9, Codicon as Codicon12, CopyButton as CopyButton3, EmptyState as EmptyState7, Input as Input2, Separator, StatusDot as StatusDot6, cn as cn6, host as host6 } from "@hermes/plugin-sdk";
 function MutationButton({ label, codicon, onClick, busy, disabled, tone }) {
-  return jsxs10(Button5, {
+  return jsxs13(Button9, {
     type: "button",
     variant: tone === "danger" ? "destructive" : "secondary",
     size: "xs",
     onClick,
     disabled: disabled || busy,
     className: "gap-1",
-    children: [jsx13(Codicon9, { name: codicon, size: "0.75rem" }), label]
+    children: [jsx13(Codicon12, { name: codicon, size: "0.75rem" }), label]
   });
 }
 function TodoRow2({ todo, onMutate, busyTodoId }) {
   const done = todo.state === "done" || todo.state === "cancelled";
-  return jsxs10("div", {
+  return jsxs13("div", {
     className: "flex items-center gap-2 px-0.5 py-0.5 text-xs",
     children: [
       jsx13(StatusDot6, { tone: done ? "muted" : "good" }),
       jsx13("span", {
-        className: cn7("min-w-0 flex-1 truncate", done && "line-through opacity-60"),
+        className: cn6("min-w-0 flex-1 truncate", done && "line-through opacity-60"),
         children: todo.title
       }),
-      jsxs10("div", {
+      jsxs13("div", {
         className: "flex shrink-0 items-center gap-1",
         children: [
           todo.state === "open" ? jsx13(MutationButton, {
@@ -2377,14 +2241,14 @@ function TodoRow2({ todo, onMutate, busyTodoId }) {
 }
 function RelationChips({ title, codicon, items, onSelect, destructive }) {
   if (items.length === 0) return null;
-  return jsxs10("div", {
+  return jsxs13("div", {
     className: "flex items-start gap-2 text-[0.625rem]",
     children: [
-      jsxs10("span", {
+      jsxs13("span", {
         className: "mt-px inline-flex w-16 shrink-0 items-center gap-1 font-medium uppercase tracking-wide text-(--ui-text-tertiary)",
-        children: [jsx13(Codicon9, { name: codicon, size: "0.65rem" }), title]
+        children: [jsx13(Codicon12, { name: codicon, size: "0.65rem" }), title]
       }),
-      jsxs10("div", {
+      jsxs13("div", {
         className: "flex min-w-0 flex-wrap gap-1",
         children: items.map(
           (it) => jsx13(
@@ -2393,7 +2257,7 @@ function RelationChips({ title, codicon, items, onSelect, destructive }) {
               type: "button",
               onClick: () => onSelect(it.id),
               title: it.hint,
-              className: cn7(
+              className: cn6(
                 "min-w-0 max-w-48 truncate rounded-[3px] px-1 py-px transition-colors",
                 destructive ? "text-destructive hover:bg-(--chrome-action-hover)" : "text-(--ui-text-secondary) hover:bg-(--chrome-action-hover) hover:text-foreground"
               ),
@@ -2407,30 +2271,30 @@ function RelationChips({ title, codicon, items, onSelect, destructive }) {
   });
 }
 function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor, setActor, onSelect }) {
-  const [progressInput, setProgressInput] = useState6("");
-  const [reason, setReason] = useState6("");
-  const [busyOp, setBusyOp] = useState6(null);
-  const [busyTodoId, setBusyTodoId] = useState6(null);
-  const [error, setError] = useState6(null);
+  const [progressInput, setProgressInput] = useState9("");
+  const [reason, setReason] = useState9("");
+  const [busyOp, setBusyOp] = useState9(null);
+  const [busyTodoId, setBusyTodoId] = useState9(null);
+  const [error, setError] = useState9(null);
   const node = (version?.nodes ?? []).find((n) => n.node_id === nodeId) ?? null;
   const todos = (version?.todos ?? []).filter((t) => t.node_id === nodeId);
   const expectedVersion = snapshot?.roadmap?.active_version;
-  const deps = useMemo7(() => node ? nodeDepsInfo(node, version) : null, [node, version]);
-  const dependants = useMemo7(() => node ? nodeDependants(node, version) : [], [node, version]);
-  const blockers = useMemo7(() => node ? nodeBlockers(node, version) : [], [node, version]);
-  const blocks = useMemo7(() => node ? nodeBlocks(node, version) : [], [node, version]);
-  useEffect3(() => {
+  const deps = useMemo6(() => node ? nodeDepsInfo(node, version) : null, [node, version]);
+  const dependants = useMemo6(() => node ? nodeDependants(node, version) : [], [node, version]);
+  const blockers = useMemo6(() => node ? nodeBlockers(node, version) : [], [node, version]);
+  const blocks = useMemo6(() => node ? nodeBlocks(node, version) : [], [node, version]);
+  useEffect5(() => {
     setProgressInput("");
     setReason("");
     setError(null);
   }, [nodeId]);
-  const guardActor = useCallback8(() => {
+  const guardActor = useCallback7(() => {
     const sent = actor.trim() || "user";
     if (isValidIdentifier(sent)) return true;
     setError({ code: null, hint: "Actor must be a valid identifier: non-empty, at most 128 characters, no control characters." });
     return false;
   }, [actor]);
-  const mutate = useCallback8(
+  const mutate = useCallback7(
     async (op, extra) => {
       if (!node || !scope || !guardActor()) return;
       if (op === "update_progress") {
@@ -2443,7 +2307,7 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
       setBusyOp(op);
       setError(null);
       try {
-        await host5.request(RPC[op], {
+        await host6.request(RPC[op], {
           profile: scope.profile,
           project_id: scope.projectId,
           roadmap_id: scope.roadmapId,
@@ -2461,13 +2325,13 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
     },
     [actor, expectedVersion, guardActor, node, onMutated, scope]
   );
-  const mutateTodo = useCallback8(
+  const mutateTodo = useCallback7(
     async (todoId, state) => {
       if (!scope || !guardActor()) return;
       setBusyTodoId(todoId);
       setError(null);
       try {
-        await host5.request(RPC.update_todo, {
+        await host6.request(RPC.update_todo, {
           profile: scope.profile,
           project_id: scope.projectId,
           roadmap_id: scope.roadmapId,
@@ -2486,23 +2350,23 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
     [actor, expectedVersion, guardActor, onMutated, scope]
   );
   if (!node) {
-    return jsx13(EmptyState8, {
+    return jsx13(EmptyState7, {
       title: "No node selected",
       description: "Pick a node in the Thread, Map, or Milestones view."
     });
   }
   const ec = mutationErrorCopy(error);
-  return jsxs10("div", {
+  return jsxs13("div", {
     className: "flex flex-col gap-2",
     children: [
       jsx13(SectionTitle, { children: "Inspector" }),
-      jsxs10("div", {
+      jsxs13("div", {
         className: "flex items-start justify-between gap-2 px-0.5",
         children: [
-          jsxs10("div", {
+          jsxs13("div", {
             className: "min-w-0",
             children: [
-              jsxs10("div", {
+              jsxs13("div", {
                 className: "flex items-center gap-1 text-[0.625rem] uppercase tracking-wide text-(--ui-text-tertiary)",
                 children: [
                   jsx13("span", { className: "truncate", children: [`${node.kind} \xB7 ${node.node_id}`] }),
@@ -2526,40 +2390,40 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
         className: "whitespace-pre-wrap break-words px-0.5 text-xs leading-relaxed text-(--ui-text-tertiary)",
         children: node.description
       }) : null,
-      jsxs10("div", {
+      jsxs13("div", {
         className: "flex flex-wrap items-center gap-x-4 gap-y-1 px-0.5 text-[0.625rem] text-(--ui-text-tertiary)",
         children: [
-          jsxs10("span", { children: ["Progress: ", node.progress ?? 0, " %"] }),
-          node.owner_agent ? jsxs10("span", { children: ["Owner: ", node.owner_agent] }) : jsx13("span", { children: "Owner: \u2014" }),
-          node.parent_node_id ? jsxs10("span", { children: ["Parent: ", node.parent_node_id] }) : null,
-          node.created_at ? jsxs10("span", { className: "tabular-nums", children: [formatDate(node.created_at)] }) : null
+          jsxs13("span", { children: ["Progress: ", node.progress ?? 0, " %"] }),
+          node.owner_agent ? jsxs13("span", { children: ["Owner: ", node.owner_agent] }) : jsx13("span", { children: "Owner: \u2014" }),
+          node.parent_node_id ? jsxs13("span", { children: ["Parent: ", node.parent_node_id] }) : null,
+          node.created_at ? jsxs13("span", { className: "tabular-nums", children: [formatDate(node.created_at)] }) : null
         ]
       }),
       // Dependencies — the depends_on drill-down (satisfied or not).
-      jsxs10("div", {
+      jsxs13("div", {
         className: "flex flex-col gap-0.5 px-0.5",
         children: [
-          jsxs10(SectionTitle, {
+          jsxs13(SectionTitle, {
             right: deps ? jsx13("span", {
-              className: cn7("tabular-nums", deps.satisfied === deps.total ? "text-(--ui-text-tertiary)" : "text-amber-500/90 dark:text-amber-300/90"),
+              className: cn6("tabular-nums", deps.satisfied === deps.total ? "text-(--ui-text-tertiary)" : "text-amber-500/90 dark:text-amber-300/90"),
               children: deps.total === 0 ? "none" : `${deps.satisfied}/${deps.total} satisfied`
             }) : null,
             children: "Dependencies"
           }),
-          deps && deps.total > 0 ? jsxs10("div", {
+          deps && deps.total > 0 ? jsxs13("div", {
             className: "flex flex-col divide-y divide-(--ui-stroke-tertiary)",
             children: deps.deps.map(
-              (d) => jsxs10(
+              (d) => jsxs13(
                 "div",
                 {
                   className: "flex items-center gap-1.5 py-0.5 text-[0.625rem]",
                   children: [
-                    jsx13(Codicon9, {
+                    jsx13(Codicon12, {
                       name: d.satisfied ? "check" : "hourglass",
                       size: "0.65rem",
                       className: d.satisfied ? "shrink-0 text-(--ui-accent)" : "shrink-0 text-amber-500/90 dark:text-amber-300/90"
                     }),
-                    d.target ? jsxs10("button", {
+                    d.target ? jsxs13("button", {
                       type: "button",
                       onClick: () => onSelect(d.target.node_id),
                       className: "min-w-0 truncate hover:underline",
@@ -2575,7 +2439,7 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
         ]
       }),
       // Graph relations — blockers in, dependants, and what this node blocks.
-      jsxs10("div", {
+      jsxs13("div", {
         className: "flex flex-col gap-1 px-0.5",
         children: [
           jsx13(RelationChips, {
@@ -2599,14 +2463,14 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
           })
         ]
       }),
-      todos.length > 0 ? jsxs10("div", {
+      todos.length > 0 ? jsxs13("div", {
         className: "flex flex-col gap-0.5 px-0.5",
         children: [
           jsx13(SectionTitle, {
             right: jsx13("span", { className: "tabular-nums text-(--ui-text-quaternary)", children: plural(todos.length, "todo") }),
             children: "Todos"
           }),
-          jsxs10("div", {
+          jsxs13("div", {
             className: "flex flex-col divide-y divide-(--ui-stroke-tertiary)",
             children: todos.map((t) => jsx13(TodoRow2, { todo: t, onMutate: mutateTodo, busyTodoId }, t.todo_id))
           })
@@ -2614,10 +2478,10 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
       }) : null,
       jsx13(Separator, { className: "my-0.5" }),
       // Actor + expected_version context row — always visible before acting.
-      jsxs10("div", {
+      jsxs13("div", {
         className: "flex flex-wrap items-center gap-2 px-0.5",
         children: [
-          jsxs10("label", {
+          jsxs13("label", {
             className: "flex items-center gap-1.5 text-[0.625rem] text-(--ui-text-tertiary)",
             children: [
               "Actor",
@@ -2630,27 +2494,27 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
               })
             ]
           }),
-          jsxs10("span", {
+          jsxs13("span", {
             className: "font-mono text-[0.6rem] text-(--ui-text-quaternary)",
             children: ["expected_version = ", String(expectedVersion)]
           })
         ]
       }),
-      error && ec ? jsxs10("div", {
+      error && ec ? jsxs13("div", {
         className: "flex items-start gap-2 rounded-[3px] bg-destructive/10 px-2 py-1.5 text-xs text-destructive",
         children: [
-          jsx13(Codicon9, { name: "error", size: "0.85rem", className: "mt-px shrink-0" }),
-          jsxs10("div", {
+          jsx13(Codicon12, { name: "error", size: "0.85rem", className: "mt-px shrink-0" }),
+          jsxs13("div", {
             className: "min-w-0 flex-1",
             children: [
-              jsxs10("div", {
+              jsxs13("div", {
                 className: "font-medium",
                 children: [ec.title, ec.code != null ? ` (code ${ec.code})` : ""]
               }),
               jsx13("div", { className: "mt-0.5 opacity-90", children: ec.hint })
             ]
           }),
-          error.code === 5064 || error.code === 5065 ? jsx13(Button5, {
+          error.code === 5064 || error.code === 5065 ? jsx13(Button9, {
             type: "button",
             variant: "secondary",
             size: "xs",
@@ -2660,7 +2524,7 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
         ]
       }) : null,
       // Node actions — availability mirrors the node's lifecycle state.
-      jsxs10("div", {
+      jsxs13("div", {
         className: "flex flex-wrap items-center gap-1.5 px-0.5",
         children: [
           jsx13(MutationButton, {
@@ -2670,7 +2534,7 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
             disabled: node.state !== "ready",
             onClick: () => mutate("claim_node")
           }),
-          jsxs10("div", {
+          jsxs13("div", {
             className: "flex items-center gap-1.5",
             children: [
               jsx13(Input2, {
@@ -2702,7 +2566,7 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
             codicon: "debug-restart",
             busy: busyOp === "unblock_node",
             onClick: () => mutate("unblock_node")
-          }) : jsxs10("div", {
+          }) : jsxs13("div", {
             className: "flex items-center gap-1.5",
             children: [
               jsx13(Input2, {
@@ -2729,52 +2593,48 @@ function Inspector({ snapshot, version, nodeId, scope, onMutated, compact, actor
 }
 
 // src/index.js
-var INSPECTOR_TABS = /* @__PURE__ */ new Set(["thread", "map", "milestones", "board"]);
-function ViewTabs({ active, onChange }) {
-  return jsxs11("div", {
+var INSPECTOR_TABS = /* @__PURE__ */ new Set(["map"]);
+function ViewTabs({ active, onChange, locked }) {
+  return jsxs14("div", {
     className: "flex flex-wrap items-center gap-4 px-0.5",
-    children: config_default.tabs.map(
-      (t) => jsx14(
+    children: config_default.tabs.map((t) => {
+      const isLocked = locked?.[t.id] === true;
+      return jsx14(
         "button",
         {
           type: "button",
+          disabled: isLocked,
           onClick: () => onChange(t.id),
-          title: t.label,
-          className: cn8(
+          title: isLocked ? `${t.label} \u2014 locked` : t.label,
+          className: cn7(
             "inline-flex items-center gap-1 border-b-2 px-0.5 pb-1.5 pt-0.5 text-xs transition-colors",
-            active === t.id ? "border-(--ui-accent) font-medium text-foreground" : "border-transparent text-(--ui-text-tertiary) hover:text-foreground"
+            isLocked ? "cursor-not-allowed border-transparent text-(--ui-text-quaternary)" : active === t.id ? "border-(--ui-accent) font-medium text-foreground" : "border-transparent text-(--ui-text-tertiary) hover:text-foreground"
           ),
-          children: [jsx14(Codicon10, { name: t.codicon, size: "0.7rem" }), jsx14("span", { children: t.label })]
+          children: [jsx14(Codicon13, { name: isLocked ? "lock" : t.codicon, size: "0.7rem" }), jsx14("span", { children: t.label })]
         },
         t.id
-      )
-    )
+      );
+    })
   });
 }
-function ActiveView({ tab, snapshot, version, selectedId, onSelect, compact, dense, scope, actor, onMutated }) {
-  if (tab === "thread") {
-    return jsx14(ThreadView, { version, selectedId, onSelect, compact, dense });
-  }
-  if (tab === "map") {
-    return jsx14(MapView, { version, selectedId, onSelect });
-  }
-  if (tab === "board") {
-    return jsx14(BoardView, { scope, selectedId, onSelect });
-  }
+function ActiveView({ tab, snapshot, version, selectedId, onSelect, scope, actor, onMutated }) {
   if (tab === "plan") {
     return jsx14(PlanView, { snapshot, scope, actor, onMutated });
   }
-  if (tab === "milestones") {
-    return jsx14(MilestonesView, { version, selectedId, onSelect, compact });
+  if (tab === "map") {
+    return jsx14(MapView, { version, selectedId, onSelect, scope });
   }
-  if (tab === "decisions") {
-    return jsx14(DecisionsView, {});
+  if (tab === "team") {
+    return jsx14(TeamView, { scope, version });
   }
-  return jsx14(FilesView, {});
+  if (tab === "readiness") {
+    return jsx14(ReadinessView, { scope, version });
+  }
+  return jsx14(BoardView, { scope, selectedId, onSelect });
 }
 function GridColumn({ header, divider, children }) {
-  return jsxs11("div", {
-    className: cn8("flex min-h-0 min-w-0 flex-col gap-1.5", divider && "border-l border-(--ui-stroke-tertiary) pl-2.5"),
+  return jsxs14("div", {
+    className: cn7("flex min-h-0 min-w-0 flex-col gap-1.5", divider && "border-l border-(--ui-stroke-tertiary) pl-2.5"),
     children: [
       header ?? null,
       jsx14(ScrollArea, { className: "min-h-0 flex-1 px-0.5", children })
@@ -2789,15 +2649,15 @@ function MidPaneSwitch({ activeTab, pane, onPane }) {
       type: "button",
       onClick: () => onPane(key),
       title: label,
-      className: cn8(
+      className: cn7(
         "inline-flex items-center gap-1 rounded-[2px] px-1.5 py-0.5 text-[0.625rem] transition-colors",
         pane === key ? "bg-(--ui-bg-elevated) font-medium text-foreground" : "text-(--ui-text-tertiary) hover:text-foreground"
       ),
-      children: [jsx14(Codicon10, { name: codicon, size: "0.65rem" }), jsx14("span", { children: label })]
+      children: [jsx14(Codicon13, { name: codicon, size: "0.65rem" }), jsx14("span", { children: label })]
     },
     key
   );
-  return jsxs11("div", {
+  return jsxs14("div", {
     className: "inline-flex items-center gap-0.5 self-start rounded-[3px] bg-(--ui-bg-quaternary) p-0.5",
     children: [
       seg("view", tabMeta?.codicon ?? "milestone", tabMeta?.label ?? activeTab),
@@ -2820,13 +2680,13 @@ function RoadmapsGrid({
   setActor,
   inspectorOpen
 }) {
-  const [midPane, setMidPane] = useState7("inspector");
+  const [midPane, setMidPane] = useState10("inspector");
   const pane = canInspect ? midPane : "view";
   const thread = jsx14(ThreadView, { version, selectedId: selectedNodeId, onSelect, dense: true });
   const view = jsx14(ActiveView, { tab: activeTab, snapshot, version, selectedId: selectedNodeId, onSelect, compact, dense: true, scope, actor, onMutated });
   const inspector = jsx14(Inspector, { snapshot, version, nodeId: selectedNodeId, scope, onMutated, compact, actor, setActor, onSelect });
   if (mode === "wide") {
-    return jsxs11("div", {
+    return jsxs14("div", {
       className: "grid min-h-0 flex-1 gap-2.5",
       style: { gridTemplateColumns: `minmax(0, 1.1fr) minmax(0, 1fr) ${config_default.layout.inspectorWidth}px` },
       children: [
@@ -2837,7 +2697,7 @@ function RoadmapsGrid({
     });
   }
   if (mode === "mid") {
-    return jsxs11("div", {
+    return jsxs14("div", {
       className: "grid min-h-0 flex-1 grid-cols-2 gap-2.5",
       children: [
         jsx14(GridColumn, { children: thread }),
@@ -2849,119 +2709,68 @@ function RoadmapsGrid({
       ]
     });
   }
-  return jsxs11("div", {
+  return jsxs14("div", {
     className: "flex min-h-0 flex-1 flex-col gap-2",
     children: [
       jsx14(ScrollArea, { className: "min-h-0 flex-1 px-0.5", children: view }),
-      compact && canInspect && inspectorOpen ? jsxs11("div", {
+      compact && canInspect && inspectorOpen ? jsxs14("div", {
         className: "flex min-h-0 flex-1 flex-col border-t border-(--ui-stroke-tertiary) pt-1.5",
         children: [jsx14(ScrollArea, { className: "min-h-0 flex-1 px-0.5", children: inspector })]
       }) : null
     ]
   });
 }
-function DraftPlanWorkspace({ actor, expectedVersion, scope }) {
-  const [visionSession, setVisionSession] = useState7(null);
-  const [busy, setBusy] = useState7(false);
-  const [error, setError] = useState7(null);
-  const start = useCallback9(async () => {
-    if (!scope || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const rules = await getPlanningRules();
-      const identity = await startVisionSession(scope.profile, rules.rules.prompt);
-      await attachVisionSession(
-        scope.profile,
-        scope.projectId,
-        scope.roadmapId,
-        identity.storedSessionId,
-        expectedVersion,
-        actor,
-        null
-      );
-      setVisionSession(identity);
-      host6.notify({ kind: "success", title: "Vision ready", message: "The Vision session is ready. Plan first, then propose the plan." });
-    } catch (err) {
-      setError({ code: rpcError(err).code });
-    } finally {
-      setBusy(false);
-    }
-  }, [actor, busy, expectedVersion, scope]);
-  const ec = mutationErrorCopy(error);
-  return jsxs11("div", {
-    className: "flex min-h-0 flex-1 flex-col gap-2",
-    children: [
-      visionSession ? jsx14(VisionLane, { session: visionSession }) : jsx14(EmptyState9, {
-        title: "Planning required",
-        description: "Start a Vision session to draft the roadmap plan. No execution workspace is available until a plan is proposed, validated, and started."
-      }),
-      error && ec ? jsxs11("div", {
-        className: "flex items-start gap-1.5 rounded-[3px] bg-destructive/10 px-2 py-1 text-xs text-destructive",
-        children: [
-          jsx14(Codicon10, { name: "error", size: "0.75rem", className: "mt-px shrink-0" }),
-          jsxs11("span", { children: [ec.hint, ec.code != null ? ` (code ${ec.code})` : ""] })
-        ]
-      }) : null,
-      jsxs11("div", {
-        className: "sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-2 border-t border-(--ui-stroke-tertiary) bg-(--ui-bg) px-0.5 py-2",
-        children: [
-          jsx14("span", { className: "text-[0.625rem] text-(--ui-text-tertiary)", children: "Plan first \u2014 propose a plan to unlock execution." }),
-          jsxs11("div", {
-            className: "flex items-center gap-2",
-            children: [
-              jsx14(Button6, {
-                type: "button",
-                size: "xs",
-                variant: visionSession ? "secondary" : "default",
-                disabled: busy,
-                onClick: () => void start(),
-                className: "gap-1",
-                children: [jsx14(Codicon10, { name: visionSession ? "debug-restart" : "add", size: "0.7rem" }), busy ? "Starting\u2026" : "Start planning"]
-              }),
-              jsx14(Button6, {
-                type: "button",
-                size: "xs",
-                variant: "default",
-                disabled: true,
-                title: "Available once the Vision draft is parsed into a proposable plan.",
-                className: "gap-1",
-                children: [jsx14(Codicon10, { name: "pass-filled", size: "0.7rem" }), "Propose plan"]
-              })
-            ]
-          })
-        ]
-      })
-    ]
-  });
-}
 function RoadmapsPage() {
-  const profile = useValue2(host6.state.profile);
-  const viewport = useValue2(host6.state.viewport);
-  const [activeTab, setActiveTab] = useState7("thread");
-  const [actor, setActor] = useState7("user");
-  const [inspectorOpen, setInspectorOpen] = useState7(false);
+  const profile = useValue2(host7.state.profile);
+  const viewport = useValue2(host7.state.viewport);
+  const [actor, setActor] = useState10("user");
+  const [inspectorOpen, setInspectorOpen] = useState10(false);
   const { containerRef, mode, compact } = useLayoutMode(viewport?.width ?? 0);
   const profileReady = typeof profile === "string" && profile.trim() !== "";
   const listQuery = useRoadmapsList(profile, profileReady);
   const projectsQuery = useProjectsList(profile, profileReady);
   const roadmaps = listQuery.data?.roadmaps ?? [];
   const projectsData = projectsQuery.data?.projects ?? [];
-  const { projectId, setProjectId, roadmapId, setRoadmapId, projectNameById, projects, roadmapOptions } = useScopeState(projectsData, roadmaps);
+  const { projectId, setProjectId, roadmapId, projectNameById, projects, roadmapOptions } = useScopeState(profile, projectsData, roadmaps);
+  const [activeTab, setActiveTab] = usePersistedState(`roadmaps:${profile}:${projectId}:tab`, "plan");
+  const [follow, setFollow] = usePersistedState(`roadmaps:${profile}:follow`, false);
+  const [activeProjectId, setActiveProjectId] = useState10(null);
+  useEffect6(() => {
+    const atom = host7.state.activeProjectId;
+    if (!atom) return void 0;
+    return atom.listen(setActiveProjectId);
+  }, []);
+  useEffect6(() => {
+    if (follow && activeProjectId && activeProjectId !== projectId) {
+      setProjectId(activeProjectId);
+    }
+  }, [follow, activeProjectId, projectId, setProjectId]);
   const scopeReady = profileReady && projectId !== "" && roadmapId !== "";
   const snapshotQuery = useRoadmapSnapshot(profile, projectId, roadmapId, scopeReady);
   const snapshot = snapshotQuery.data;
   const found = snapshot?.found === true;
-  const version = useMemo8(() => activeVersion(snapshot), [snapshot]);
-  const productState = useMemo8(() => deriveProductState(snapshot), [snapshot]);
+  const version = useMemo7(() => activeVersion(snapshot), [snapshot]);
   const { selectedNodeId, setSelectedNodeId, onSelect } = useNodeSelection([profile, projectId, roadmapId], version);
-  const reloadSnapshot = useCallback9(() => {
+  const reloadSnapshot = useCallback8(() => {
     void snapshotQuery.refetch();
   }, [snapshotQuery]);
   const scope = scopeReady ? { profile, projectId, roadmapId } : null;
+  const versionReady = version != null;
+  const planBatteryQuery = useRoadmapPlanBattery(profile, projectId, roadmapId, version, scopeReady && versionReady);
+  const teamBatteryQuery = useRoadmapTeamBattery(profile, projectId, roadmapId, version, scopeReady && versionReady);
+  const readinessBatteryQuery = useRoadmapReadinessBattery(profile, projectId, roadmapId, version, scopeReady && versionReady);
+  const planOk = planBatteryQuery.data?.ok === true;
+  const teamOk = teamBatteryQuery.data?.ok === true;
+  const readinessOk = readinessBatteryQuery.data?.ok === true;
+  const lockedTabs = { plan: false, team: !planOk, readiness: !teamOk, map: !readinessOk };
+  useEffect6(() => {
+    if (activeTab === "team" && !planOk) setActiveTab("plan");
+    else if (activeTab === "readiness" && !teamOk) setActiveTab("plan");
+    else if (activeTab === "map" && !readinessOk) setActiveTab("plan");
+  }, [activeTab, planOk, teamOk, readinessOk]);
   const canInspect = selectedNodeId !== "" && INSPECTOR_TABS.has(activeTab);
   if (!profileReady) {
-    return jsx14(EmptyState9, {
+    return jsx14(EmptyState8, {
       title: "Profile not initialized",
       description: 'No active profile identity is available. Roadmaps refuses to guess a profile (no silent fallback to "default").'
     });
@@ -2969,23 +2778,23 @@ function RoadmapsPage() {
   const listError = listQuery.isError ? errorCopy(listQuery.error) : null;
   const snapshotError = snapshotQuery.isError ? errorCopy(snapshotQuery.error) : null;
   const panel = (content2) => jsx14(ScrollArea, { className: "min-h-0 flex-1 px-0.5", children: content2 });
-  const needsVersion = activeTab === "thread" || activeTab === "map" || activeTab === "milestones";
+  const needsVersion = activeTab === "map";
   let content;
   if (!scopeReady) {
     content = panel(
-      jsx14(EmptyState9, {
-        title: "Select a project and a roadmap\u2026",
-        description: "The Thread, Map, Plan, Milestones, Decisions, and Files views appear once a project and a roadmap are chosen."
+      jsx14(EmptyState8, {
+        title: "Select a project\u2026",
+        description: "The Plan, Team, Readiness, and Map views appear once a project is chosen."
       })
     );
   } else if (snapshotQuery.isLoading) {
-    content = panel(jsx14(Skeleton2, { className: "h-24 w-full" }));
+    content = panel(jsx14(Skeleton4, { className: "h-24 w-full" }));
   } else if (snapshotQuery.isError) {
     content = panel(
-      jsx14(ErrorState2, {
+      jsx14(ErrorState4, {
         title: "Snapshot unavailable",
         description: `${snapshotError.hint}${snapshotError.code != null ? ` (code ${snapshotError.code})` : ""}`,
-        children: jsx14(Button6, {
+        children: jsx14(Button10, {
           type: "button",
           size: "xs",
           variant: "secondary",
@@ -2996,21 +2805,14 @@ function RoadmapsPage() {
     );
   } else if (!found) {
     content = panel(
-      jsx14(EmptyState9, {
+      jsx14(EmptyState8, {
         title: "No roadmap for this scope",
         description: `No roadmap found for ${projectId} / ${roadmapId} in profile ${profile}.`
       })
     );
-  } else if (productState === "DRAFT_NO_PLAN") {
-    content = jsx14(DraftPlanWorkspace, {
-      key: `${profile}/${projectId}/${roadmapId}`,
-      actor,
-      expectedVersion: snapshot.roadmap.active_version ?? 0,
-      scope
-    });
   } else if (needsVersion && !version) {
     content = panel(
-      jsx14(EmptyState9, {
+      jsx14(EmptyState8, {
         title: "No active version",
         description: "This roadmap has no active version to display."
       })
@@ -3032,7 +2834,7 @@ function RoadmapsPage() {
       inspectorOpen
     });
   }
-  return jsxs11("div", {
+  return jsxs14("div", {
     ref: containerRef,
     className: "flex h-full min-h-0 flex-col gap-2 p-3",
     children: [
@@ -3043,46 +2845,44 @@ function RoadmapsPage() {
         profile,
         projectId,
         setProjectId,
-        roadmapId,
-        setRoadmapId,
         setSelectedNodeId,
         projects,
         projectNameById,
-        roadmapOptions,
         compact,
         roadmapsCount: roadmaps.length,
         projectsError: projectsQuery.isError ? errorCopy(projectsQuery.error) : null,
         onRetryProjects: () => void projectsQuery.refetch(),
-        actor
+        follow,
+        onToggleFollow: () => setFollow((v) => !v)
       }),
       // List states: explicit error (with retry) before any empty state.
-      listError ? jsx14(ErrorState2, {
+      listError ? jsx14(ErrorState4, {
         title: "Roadmap list unavailable",
         description: `${listError.hint}${listError.code != null ? ` (code ${listError.code})` : ""}`,
-        children: jsx14(Button6, {
+        children: jsx14(Button10, {
           type: "button",
           size: "xs",
           variant: "secondary",
           onClick: () => void listQuery.refetch(),
           children: "Retry"
         })
-      }) : projectId !== "" && roadmapOptions.length === 0 && !listQuery.isLoading ? jsx14(EmptyState9, {
+      }) : projectId !== "" && roadmapOptions.length === 0 && !listQuery.isLoading ? jsx14(EmptyState8, {
         title: "No roadmaps for this scope",
         description: `Project "${projectNameById.get(projectId) || projectId}" has no roadmaps in profile ${profile}. Create one on the backend (projects.db remains the source of truth).`
       }) : null,
       // Roadmap header (title + lifecycle + version) once a roadmap is chosen.
-      found && snapshot?.roadmap ? jsxs11("div", {
+      found && snapshot?.roadmap ? jsxs14("div", {
         className: "flex flex-wrap items-center gap-2 border-b border-(--ui-stroke-tertiary) px-0.5 pb-2",
         children: [
-          jsxs11("div", {
+          jsxs14("div", {
             className: "min-w-0 flex-1",
             children: [
               jsx14("div", { className: "truncate text-[0.8125rem] font-medium", children: snapshot.roadmap.title || roadmapId }),
               !compact && snapshot.roadmap.purpose ? jsx14("div", { className: "truncate text-[0.625rem] text-(--ui-text-tertiary)", children: snapshot.roadmap.purpose }) : null
             ]
           }),
-          jsxs11(Badge2, { size: "xs", variant: "outline", children: [jsx14(StatusDot7, { tone: "good" }), snapshot.roadmap.lifecycle_state] }),
-          jsxs11("span", { className: "font-mono text-[0.625rem] text-(--ui-text-tertiary)", children: ["v", String(snapshot.roadmap.active_version)] }),
+          jsxs14(Badge3, { size: "xs", variant: "outline", children: [jsx14(StatusDot7, { tone: "good" }), snapshot.roadmap.lifecycle_state] }),
+          jsxs14("span", { className: "font-mono text-[0.625rem] text-(--ui-text-tertiary)", children: ["v", String(snapshot.roadmap.active_version)] }),
           jsx14(CopyButton4, {
             appearance: "icon",
             buttonSize: "icon-xs",
@@ -3098,17 +2898,17 @@ function RoadmapsPage() {
       found && snapshot?.roadmap ? jsx14(CopilotBar, { version, selectedId: selectedNodeId, onSelect, dense: compact }) : null,
       // Module navigation — visible as soon as a scope is chosen. In compact
       // the tab row also hosts the "Details" toggle for the Inspector panel.
-      scopeReady ? jsxs11("div", {
+      scopeReady ? jsxs14("div", {
         className: "flex flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b border-(--ui-stroke-tertiary)",
         children: [
-          jsx14(ViewTabs, { active: activeTab, onChange: setActiveTab }),
-          compact && canInspect ? jsx14(Button6, {
+          jsx14(ViewTabs, { active: activeTab, onChange: setActiveTab, locked: lockedTabs }),
+          compact && canInspect ? jsx14(Button10, {
             type: "button",
             variant: inspectorOpen ? "secondary" : "ghost",
             size: "xs",
             onClick: () => setInspectorOpen((v) => !v),
             className: "gap-1",
-            children: [jsx14(Codicon10, { name: "info", size: "0.7rem" }), "Details"]
+            children: [jsx14(Codicon13, { name: "info", size: "0.7rem" }), "Details"]
           }) : null
         ]
       }) : null,

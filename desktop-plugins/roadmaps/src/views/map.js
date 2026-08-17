@@ -1,9 +1,10 @@
 /**
- * Roadmaps plugin — Map view.
+ * Roadmaps plugin — Map view (cartography + relations combined).
  *
- * Canonical relations (depends_on, blocks) of the active version — active by
- * default, with a toggle to include inactive ones. Each row is a real
- * relation from the snapshot; nothing decorative.
+ * The primary project-tracking surface: the plan cartography (objective →
+ * milestones → phases → todos, with live kanban/worker state) plus the
+ * canonical relations (depends_on, blocks) of the active version. Both are
+ * pure projections of the active version; the Kanban stays the executor.
  */
 
 import { useCallback, useMemo, useState } from 'react'
@@ -12,6 +13,7 @@ import { Codicon, EmptyState, cn } from '@hermes/plugin-sdk'
 import config from '../config.json'
 import { SectionTitle } from '../ui.js'
 import { mapRelations, nodeLabel } from '../data.js'
+import { BoardView } from './board.js'
 
 const RELATION_LABEL = config.relation.label
 const RELATION_ICON = config.relation.icon
@@ -46,31 +48,37 @@ export function RelationRow({ rel, selectedNodeId, onSelect }) {
   })
 }
 
-export function MapView({ version, selectedId, onSelect }) {
+export function MapView({ version, selectedId, onSelect, scope }) {
   const [showInactive, setShowInactive] = useState(false)
   const rels = useMemo(() => mapRelations(version, { includeInactive: showInactive }), [version, showInactive])
 
   return jsxs('div', {
-    className: 'flex flex-col gap-1.5',
+    className: 'flex flex-col gap-2',
     children: [
-      jsxs(SectionTitle, {
-        right: jsx('button', {
-          type: 'button',
-          onClick: () => setShowInactive((v) => !v),
-          className: 'rounded-[3px] px-1 text-[0.625rem] normal-case tracking-normal text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground',
-          children: showInactive ? 'active only' : 'include inactive'
-        }),
-        children: ['Relations', ` (${rels.length})`]
-      }),
-      rels.length === 0
-        ? jsx(EmptyState, {
-            title: showInactive ? 'No relations' : 'No active relations',
-            description: 'Each row is a canonical relation (depends on, blocks) of the active version.'
-          })
-        : jsxs('div', {
-            className: 'flex flex-col divide-y divide-(--ui-stroke-tertiary)',
-            children: rels.map((r) => jsx(RelationRow, { rel: r, selectedNodeId: selectedId, onSelect }, r.relation_id))
-          })
+      jsx(BoardView, { scope, selectedId, onSelect }),
+      jsxs('div', {
+        className: 'flex flex-col gap-1.5',
+        children: [
+          jsxs(SectionTitle, {
+            right: jsx('button', {
+              type: 'button',
+              onClick: () => setShowInactive((v) => !v),
+              className: 'rounded-[3px] px-1 text-[0.625rem] normal-case tracking-normal text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground',
+              children: showInactive ? 'active only' : 'include inactive'
+            }),
+            children: ['Relations', ` (${rels.length})`]
+          }),
+          rels.length === 0
+            ? jsx(EmptyState, {
+                title: showInactive ? 'No relations' : 'No active relations',
+                description: 'Each row is a canonical relation (depends on, blocks) of the active version.'
+              })
+            : jsxs('div', {
+                className: 'flex flex-col divide-y divide-(--ui-stroke-tertiary)',
+                children: rels.map((r) => jsx(RelationRow, { rel: r, selectedNodeId: selectedId, onSelect }, r.relation_id))
+              })
+        ]
+      })
     ]
   })
 }

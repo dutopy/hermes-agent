@@ -18,8 +18,8 @@ def seed(path: Path) -> None:
         ("profile", "p", "r", "Roadmap", None, "in_progress", 1, "agent", "agent", 1, 1),
     )
     conn.execute(
-        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("profile", "p", "r", 1, "validated", "src", None, "agent", 1, None),
+        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("profile", "p", "r", 1, "validated", None, "src", None, "agent", 1, None),
     )
     conn.execute(
         "INSERT INTO roadmap_nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

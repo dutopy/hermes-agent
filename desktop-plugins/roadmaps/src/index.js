@@ -19,7 +19,7 @@
  * CopilotBar and the ViewTabs stay above the columns in every mode.
  */
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import {
   Badge,
@@ -38,45 +38,49 @@ import {
   useValue
 } from '@hermes/plugin-sdk'
 import config from './config.json'
-import { ID, activeVersion, attachVisionSession, errorCopy, getPlanningRules, mutationErrorCopy, rpcError, startVisionSession } from './data.js'
-import { deriveProductState, useLayoutMode, useNodeSelection, useProjectsList, useRoadmapSnapshot, useRoadmapsList, useScopeState } from './state.js'
+import { ID, activeVersion, errorCopy } from './data.js'
+import { useLayoutMode, useNodeSelection, useProjectsList, useRoadmapPlanBattery, useRoadmapReadinessBattery, useRoadmapSnapshot, useRoadmapTeamBattery, useRoadmapsList, useScopeState } from './state.js'
+import { usePersistedState } from './persist.js'
 import { ScopeBar } from './scope.js'
 import { CopilotBar } from './copilot.js'
 import { ThreadView } from './views/fil.js'
 import { MapView } from './views/map.js'
 import { BoardView } from './views/board.js'
 import { PlanView } from './views/plan.js'
-import { MilestonesView } from './views/milestones.js'
-import { DecisionsView } from './views/decisions.js'
-import { FilesView } from './views/files.js'
+import { TeamView } from './views/team.js'
+import { ReadinessView } from './views/readiness.js'
 import { VisionLane } from './views/vision.js'
 import { Inspector } from './inspector.js'
 
 /** Tabs that participate in node selection + the Inspector panel. */
-const INSPECTOR_TABS = new Set(['thread', 'map', 'milestones', 'board'])
+const INSPECTOR_TABS = new Set(['map'])
 
 /** Underline tabs — active = accent underline, no boxes. */
-function ViewTabs({ active, onChange }) {
+function ViewTabs({ active, onChange, locked }) {
   return jsxs('div', {
     className: 'flex flex-wrap items-center gap-4 px-0.5',
-    children: config.tabs.map((t) =>
-      jsx(
+    children: config.tabs.map((t) => {
+      const isLocked = locked?.[t.id] === true
+      return jsx(
         'button',
         {
           type: 'button',
+          disabled: isLocked,
           onClick: () => onChange(t.id),
-          title: t.label,
+          title: isLocked ? `${t.label} — locked` : t.label,
           className: cn(
             'inline-flex items-center gap-1 border-b-2 px-0.5 pb-1.5 pt-0.5 text-xs transition-colors',
-            active === t.id
-              ? 'border-(--ui-accent) font-medium text-foreground'
-              : 'border-transparent text-(--ui-text-tertiary) hover:text-foreground'
+            isLocked
+              ? 'cursor-not-allowed border-transparent text-(--ui-text-quaternary)'
+              : active === t.id
+                ? 'border-(--ui-accent) font-medium text-foreground'
+                : 'border-transparent text-(--ui-text-tertiary) hover:text-foreground'
           ),
-          children: [jsx(Codicon, { name: t.codicon, size: '0.7rem' }), jsx('span', { children: t.label })]
+          children: [jsx(Codicon, { name: isLocked ? 'lock' : t.codicon, size: '0.7rem' }), jsx('span', { children: t.label })]
         },
         t.id
       )
-    )
+    })
   })
 }
 
@@ -84,26 +88,20 @@ function ViewTabs({ active, onChange }) {
 // The view only — scroll containers and the Inspector placement live in the
 // grid so the same view renders at any breakpoint.
 
-function ActiveView({ tab, snapshot, version, selectedId, onSelect, compact, dense, scope, actor, onMutated }) {
-  if (tab === 'thread') {
-    return jsx(ThreadView, { version, selectedId, onSelect, compact, dense })
-  }
-  if (tab === 'map') {
-    return jsx(MapView, { version, selectedId, onSelect })
-  }
-  if (tab === 'board') {
-    return jsx(BoardView, { scope, selectedId, onSelect })
-  }
+function ActiveView({ tab, snapshot, version, selectedId, onSelect, scope, actor, onMutated }) {
   if (tab === 'plan') {
     return jsx(PlanView, { snapshot, scope, actor, onMutated })
   }
-  if (tab === 'milestones') {
-    return jsx(MilestonesView, { version, selectedId, onSelect, compact })
+  if (tab === 'map') {
+    return jsx(MapView, { version, selectedId, onSelect, scope })
   }
-  if (tab === 'decisions') {
-    return jsx(DecisionsView, {})
+  if (tab === 'team') {
+    return jsx(TeamView, { scope, version })
   }
-  return jsx(FilesView, {})
+  if (tab === 'readiness') {
+    return jsx(ReadinessView, { scope, version })
+  }
+  return jsx(BoardView, { scope, selectedId, onSelect })
 }
 
 // ── grid columns ────────────────────────────────────────────────────────────
@@ -224,103 +222,10 @@ function RoadmapsGrid({
 
 // ── page ────────────────────────────────────────────────────────────────────
 
-/**
- * DRAFT_NO_PLAN workspace (spec §2, §8.1): the embedded Vision lane plus a
- * sticky Plan-first action bar. "Start planning" seeds a fresh Vision session
- * (session.create source 'vision'), attaches its durable lineage, then renders
- * SessionSurface in place — no host.openSession, no navigation outside the
- * plugin. "Propose plan" is the next governance step; it stays disabled until
- * the Vision draft can be parsed into a proposable plan (a later slice).
- * No execution workspace is available in this state.
- */
-function DraftPlanWorkspace({ actor, expectedVersion, scope }) {
-  const [visionSession, setVisionSession] = useState(null)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState(null)
-
-  const start = useCallback(async () => {
-    if (!scope || busy) return
-    setBusy(true)
-    setError(null)
-    try {
-      const rules = await getPlanningRules()
-      const identity = await startVisionSession(scope.profile, rules.rules.prompt)
-      await attachVisionSession(
-        scope.profile,
-        scope.projectId,
-        scope.roadmapId,
-        identity.storedSessionId,
-        expectedVersion,
-        actor,
-        null
-      )
-      setVisionSession(identity)
-      host.notify({ kind: 'success', title: 'Vision ready', message: 'The Vision session is ready. Plan first, then propose the plan.' })
-    } catch (err) {
-      setError({ code: rpcError(err).code })
-    } finally {
-      setBusy(false)
-    }
-  }, [actor, busy, expectedVersion, scope])
-
-  const ec = mutationErrorCopy(error)
-
-  return jsxs('div', {
-    className: 'flex min-h-0 flex-1 flex-col gap-2',
-    children: [
-      visionSession
-        ? jsx(VisionLane, { session: visionSession })
-        : jsx(EmptyState, {
-            title: 'Planning required',
-            description: 'Start a Vision session to draft the roadmap plan. No execution workspace is available until a plan is proposed, validated, and started.'
-          }),
-      error && ec
-        ? jsxs('div', {
-            className: 'flex items-start gap-1.5 rounded-[3px] bg-destructive/10 px-2 py-1 text-xs text-destructive',
-            children: [
-              jsx(Codicon, { name: 'error', size: '0.75rem', className: 'mt-px shrink-0' }),
-              jsxs('span', { children: [ec.hint, ec.code != null ? ` (code ${ec.code})` : ''] })
-            ]
-          })
-        : null,
-      jsxs('div', {
-        className: 'sticky bottom-0 z-10 flex flex-wrap items-center justify-between gap-2 border-t border-(--ui-stroke-tertiary) bg-(--ui-bg) px-0.5 py-2',
-        children: [
-          jsx('span', { className: 'text-[0.625rem] text-(--ui-text-tertiary)', children: 'Plan first — propose a plan to unlock execution.' }),
-          jsxs('div', {
-            className: 'flex items-center gap-2',
-            children: [
-              jsx(Button, {
-                type: 'button',
-                size: 'xs',
-                variant: visionSession ? 'secondary' : 'default',
-                disabled: busy,
-                onClick: () => void start(),
-                className: 'gap-1',
-                children: [jsx(Codicon, { name: visionSession ? 'debug-restart' : 'add', size: '0.7rem' }), busy ? 'Starting…' : 'Start planning']
-              }),
-              jsx(Button, {
-                type: 'button',
-                size: 'xs',
-                variant: 'default',
-                disabled: true,
-                title: 'Available once the Vision draft is parsed into a proposable plan.',
-                className: 'gap-1',
-                children: [jsx(Codicon, { name: 'pass-filled', size: '0.7rem' }), 'Propose plan']
-              })
-            ]
-          })
-        ]
-      })
-    ]
-  })
-}
-
 function RoadmapsPage() {
   const profile = useValue(host.state.profile)
   const viewport = useValue(host.state.viewport)
 
-  const [activeTab, setActiveTab] = useState('thread')
   const [actor, setActor] = useState('user')
   const [inspectorOpen, setInspectorOpen] = useState(false)
 
@@ -340,7 +245,25 @@ function RoadmapsPage() {
 
   const roadmaps = listQuery.data?.roadmaps ?? []
   const projectsData = projectsQuery.data?.projects ?? []
-  const { projectId, setProjectId, roadmapId, setRoadmapId, projectNameById, projects, roadmapOptions } = useScopeState(projectsData, roadmaps)
+  const { projectId, setProjectId, roadmapId, projectNameById, projects, roadmapOptions } = useScopeState(profile, projectsData, roadmaps)
+  const [activeTab, setActiveTab] = usePersistedState(`roadmaps:${profile}:${projectId}:tab`, 'plan')
+  const [follow, setFollow] = usePersistedState(`roadmaps:${profile}:follow`, false)
+  const [activeProjectId, setActiveProjectId] = useState(null)
+
+  // Follow: while enabled, the selected project tracks the app's active
+  // project (sidebar). Manual selection still wins until the next change.
+  // Tolerates a renderer that does not yet expose activeProjectId.
+  useEffect(() => {
+    const atom = host.state.activeProjectId
+    if (!atom) return undefined
+    return atom.listen(setActiveProjectId)
+  }, [])
+
+  useEffect(() => {
+    if (follow && activeProjectId && activeProjectId !== projectId) {
+      setProjectId(activeProjectId)
+    }
+  }, [follow, activeProjectId, projectId, setProjectId])
 
   const scopeReady = profileReady && projectId !== '' && roadmapId !== ''
 
@@ -350,7 +273,6 @@ function RoadmapsPage() {
   const snapshot = snapshotQuery.data
   const found = snapshot?.found === true
   const version = useMemo(() => activeVersion(snapshot), [snapshot])
-  const productState = useMemo(() => deriveProductState(snapshot), [snapshot])
 
   // Selection hygiene: reset on scope identity change, drop vanished nodes.
   const { selectedNodeId, setSelectedNodeId, onSelect } = useNodeSelection([profile, projectId, roadmapId], version)
@@ -360,6 +282,25 @@ function RoadmapsPage() {
   }, [snapshotQuery])
 
   const scope = scopeReady ? { profile, projectId, roadmapId } : null
+
+  // Pipeline gating (spec §3): each step unlocks the next once its battery is
+  // green. Plan is always open; Team needs Batterie Plan, Readiness needs
+  // Batterie Team, Map needs Batterie Readiness.
+  const versionReady = version != null
+  const planBatteryQuery = useRoadmapPlanBattery(profile, projectId, roadmapId, version, scopeReady && versionReady)
+  const teamBatteryQuery = useRoadmapTeamBattery(profile, projectId, roadmapId, version, scopeReady && versionReady)
+  const readinessBatteryQuery = useRoadmapReadinessBattery(profile, projectId, roadmapId, version, scopeReady && versionReady)
+  const planOk = planBatteryQuery.data?.ok === true
+  const teamOk = teamBatteryQuery.data?.ok === true
+  const readinessOk = readinessBatteryQuery.data?.ok === true
+  const lockedTabs = { plan: false, team: !planOk, readiness: !teamOk, map: !readinessOk }
+
+  // If the active tab becomes locked (a gate regressed), fall back to Plan.
+  useEffect(() => {
+    if (activeTab === 'team' && !planOk) setActiveTab('plan')
+    else if (activeTab === 'readiness' && !teamOk) setActiveTab('plan')
+    else if (activeTab === 'map' && !readinessOk) setActiveTab('plan')
+  }, [activeTab, planOk, teamOk, readinessOk])
 
   // Selection only swaps panes on the selection-aware tabs; on the others
   // (Plan / Decisions / Files) mid and compact keep showing the active view.
@@ -376,7 +317,7 @@ function RoadmapsPage() {
   const listError = listQuery.isError ? errorCopy(listQuery.error) : null
   const snapshotError = snapshotQuery.isError ? errorCopy(snapshotQuery.error) : null
   const panel = (content) => jsx(ScrollArea, { className: 'min-h-0 flex-1 px-0.5', children: content })
-  const needsVersion = activeTab === 'thread' || activeTab === 'map' || activeTab === 'milestones'
+  const needsVersion = activeTab === 'map'
 
   // Shared snapshot states (loading / error / not-found / no active version)
   // gate every tab uniformly; Plan still lists versions even without an
@@ -385,8 +326,8 @@ function RoadmapsPage() {
   if (!scopeReady) {
     content = panel(
       jsx(EmptyState, {
-        title: 'Select a project and a roadmap…',
-        description: 'The Thread, Map, Plan, Milestones, Decisions, and Files views appear once a project and a roadmap are chosen.'
+        title: 'Select a project…',
+        description: 'The Plan, Team, Readiness, and Map views appear once a project is chosen.'
       })
     )
   } else if (snapshotQuery.isLoading) {
@@ -412,15 +353,6 @@ function RoadmapsPage() {
         description: `No roadmap found for ${projectId} / ${roadmapId} in profile ${profile}.`
       })
     )
-  } else if (productState === 'DRAFT_NO_PLAN') {
-    // Plan-first: a roadmap with no active and no proposed/validated version
-    // opens the embedded Vision lane, not the 6-tab grid (spec §2).
-    content = jsx(DraftPlanWorkspace, {
-      key: `${profile}/${projectId}/${roadmapId}`,
-      actor,
-      expectedVersion: snapshot.roadmap.active_version ?? 0,
-      scope
-    })
   } else if (needsVersion && !version) {
     content = panel(
       jsx(EmptyState, {
@@ -457,17 +389,15 @@ function RoadmapsPage() {
         profile,
         projectId,
         setProjectId,
-        roadmapId,
-        setRoadmapId,
         setSelectedNodeId,
         projects,
         projectNameById,
-        roadmapOptions,
         compact,
         roadmapsCount: roadmaps.length,
         projectsError: projectsQuery.isError ? errorCopy(projectsQuery.error) : null,
         onRetryProjects: () => void projectsQuery.refetch(),
-        actor
+        follow,
+        onToggleFollow: () => setFollow((v) => !v)
       }),
 
       // List states: explicit error (with retry) before any empty state.
@@ -528,7 +458,7 @@ function RoadmapsPage() {
         ? jsxs('div', {
             className: 'flex flex-wrap items-center justify-between gap-x-2 gap-y-1 border-b border-(--ui-stroke-tertiary)',
             children: [
-              jsx(ViewTabs, { active: activeTab, onChange: setActiveTab }),
+              jsx(ViewTabs, { active: activeTab, onChange: setActiveTab, locked: lockedTabs }),
               compact && canInspect
                 ? jsx(Button, {
                     type: 'button',

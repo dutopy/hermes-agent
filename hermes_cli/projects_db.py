@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS roadmap_versions (
     roadmap_id TEXT NOT NULL CHECK (length(trim(replace(replace(replace(roadmap_id, char(9), ''), char(10), ''), char(13), ''))) > 0),
     version INTEGER NOT NULL CHECK (version >= 1),
     state TEXT NOT NULL CHECK (state IN ('draft','proposed','validated','superseded','archived')),
+    title TEXT,
     source TEXT,
     reason TEXT,
     created_by TEXT NOT NULL CHECK (length(trim(replace(replace(replace(created_by, char(9), ''), char(10), ''), char(13), ''))) > 0),
@@ -428,7 +429,7 @@ _ROADMAP_SCHEMA_CONTRACT = MappingProxyType(
         "roadmap_versions": (
             (("profile_id", "TEXT", 1, 1), ("project_id", "TEXT", 1, 2),
              ("roadmap_id", "TEXT", 1, 3), ("version", "INTEGER", 1, 4),
-             ("state", "TEXT", 1, 0), ("source", "TEXT", 0, 0), ("reason", "TEXT", 0, 0),
+             ("state", "TEXT", 1, 0), ("title", "TEXT", 0, 0), ("source", "TEXT", 0, 0), ("reason", "TEXT", 0, 0),
              ("created_by", "TEXT", 1, 0), ("created_at", "INTEGER", 1, 0),
              ("content_hash", "TEXT", 0, 0)),
             (("roadmaps", ("profile_id", "project_id", "roadmap_id"),
@@ -789,6 +790,10 @@ _OPTIONAL_ROADMAP_NODE_COLUMNS = ("block_reason",)
 # criteria, spec ``docs/roadmaps-plan-team-execute-20260816.md`` §4.1.4).
 _OPTIONAL_ROADMAP_TODO_COLUMNS = ("acceptance", "owner_worker")
 
+# TEXT column added to `roadmap_versions` for plan naming (plans are named +
+# selectable per project).
+_OPTIONAL_ROADMAP_VERSION_COLUMNS = ("title",)
+
 
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     """Add columns introduced after v1 to legacy DBs (safe on every open)."""
@@ -818,6 +823,15 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         for col in _OPTIONAL_ROADMAP_TODO_COLUMNS:
             if col not in todo_cols:
                 _add_column_if_missing(conn, "roadmap_todos", col, f"{col} TEXT")
+
+    version_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='roadmap_versions'"
+    ).fetchone()
+    if version_table is not None:
+        version_cols = {row["name"] for row in conn.execute("PRAGMA table_info(roadmap_versions)")}
+        for col in _OPTIONAL_ROADMAP_VERSION_COLUMNS:
+            if col not in version_cols:
+                _add_column_if_missing(conn, "roadmap_versions", col, f"{col} TEXT")
 
 
 # ---------------------------------------------------------------------------

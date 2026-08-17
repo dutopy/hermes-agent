@@ -397,8 +397,8 @@ def seed(path: Path) -> None:
         ("prof", "p", "r", "Roadmap", None, "draft", None, "creator", "creator", 1, 1),
     )
     conn.execute(
-        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("prof", "p", "r", 1, "draft", "seed", None, "creator", 1, None),
+        "INSERT INTO roadmap_versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("prof", "p", "r", 1, "draft", None, "seed", None, "creator", 1, None),
     )
     conn.commit()
     conn.close()

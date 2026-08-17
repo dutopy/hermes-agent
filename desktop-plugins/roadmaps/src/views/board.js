@@ -10,9 +10,9 @@ import { useCallback } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { Button, Codicon, EmptyState, ErrorState, Skeleton, StatusDot, cn } from '@hermes/plugin-sdk'
 import config from '../config.json'
-import { NodeStateTag, SectionTitle } from '../ui.js'
+import { BatteryBadge, NodeStateTag, SectionTitle } from '../ui.js'
 import { errorCopy, nodeLabel, plural } from '../data.js'
-import { useRoadmapBoard } from '../state.js'
+import { useRoadmapBoard, useRoadmapPlanBattery } from '../state.js'
 
 const CARD_TONE = config.board.cardTone
 
@@ -60,7 +60,7 @@ function TodoRow({ todo }) {
 }
 
 function PhaseGroup({ phase, selectedId, onSelect }) {
-  const onClick = useCallback(() => onSelect(phase.node_id), [phase.node_id, onSelect])
+  const onClick = useCallback(() => onSelect(phase.phase.node_id), [phase.phase.node_id, onSelect])
   return jsxs('div', {
     className: 'flex flex-col border-l border-(--ui-stroke-tertiary) pl-2',
     children: [
@@ -69,12 +69,12 @@ function PhaseGroup({ phase, selectedId, onSelect }) {
         onClick,
         className: cn(
           'flex items-center gap-1.5 px-1 py-1 text-left transition-colors',
-          phase.node_id === selectedId ? 'text-primary' : 'text-(--ui-text-secondary) hover:text-foreground'
+          phase.phase.node_id === selectedId ? 'text-primary' : 'text-(--ui-text-secondary) hover:text-foreground'
         ),
         children: [
           jsx(Codicon, { name: 'chevron-right', size: '0.65rem', className: 'shrink-0' }),
-          jsx('span', { className: 'min-w-0 flex-1 truncate text-xs', children: nodeLabel(phase) }),
-          jsx(NodeStateTag, { state: phase.state })
+          jsx('span', { className: 'min-w-0 flex-1 truncate text-xs', children: nodeLabel(phase.phase) }),
+          jsx(NodeStateTag, { state: phase.phase.state })
         ]
       }),
       phase.todos.length === 0
@@ -88,7 +88,7 @@ function PhaseGroup({ phase, selectedId, onSelect }) {
 }
 
 function MilestoneGroup({ milestone, selectedId, onSelect }) {
-  const onClick = useCallback(() => onSelect(milestone.node_id), [milestone.node_id, onSelect])
+  const onClick = useCallback(() => onSelect(milestone.milestone.node_id), [milestone.milestone.node_id, onSelect])
   return jsxs('div', {
     className: 'flex flex-col',
     children: [
@@ -97,19 +97,19 @@ function MilestoneGroup({ milestone, selectedId, onSelect }) {
         onClick,
         className: cn(
           'flex items-center gap-2 px-1 py-1.5 text-left transition-colors',
-          milestone.node_id === selectedId ? 'bg-primary/[0.06]' : 'hover:bg-(--chrome-action-hover)'
+          milestone.milestone.node_id === selectedId ? 'bg-primary/[0.06]' : 'hover:bg-(--chrome-action-hover)'
         ),
         children: [
           jsx(Codicon, { name: 'milestone', size: '0.7rem', className: 'shrink-0 text-(--ui-text-tertiary)' }),
-          jsx('span', { className: 'min-w-0 flex-1 truncate text-xs font-medium', children: nodeLabel(milestone) }),
-          jsx(NodeStateTag, { state: milestone.state })
+          jsx('span', { className: 'min-w-0 flex-1 truncate text-xs font-medium', children: nodeLabel(milestone.milestone) }),
+          jsx(NodeStateTag, { state: milestone.milestone.state })
         ]
       }),
       milestone.phases.length === 0
         ? jsx('div', { className: 'px-2 py-0.5 text-[0.625rem] text-(--ui-text-quaternary)', children: 'No phases' })
         : jsx('div', {
             className: 'flex flex-col gap-1 pl-3',
-            children: milestone.phases.map((p) => jsx(PhaseGroup, { phase: p.phase, selectedId, onSelect }, p.phase.node_id))
+            children: milestone.phases.map((p) => jsx(PhaseGroup, { phase: p, selectedId, onSelect }, p.phase.node_id))
           })
     ]
   })
@@ -117,6 +117,8 @@ function MilestoneGroup({ milestone, selectedId, onSelect }) {
 
 export function BoardView({ scope, selectedId, onSelect }) {
   const query = useRoadmapBoard(scope.profile, scope.projectId, scope.roadmapId, true)
+  const boardVersion = query.data?.version ?? null
+  const planBattery = useRoadmapPlanBattery(scope.profile, scope.projectId, scope.roadmapId, boardVersion, boardVersion != null)
 
   if (query.isLoading) {
     return jsx(Skeleton, { className: 'h-24 w-full' })
@@ -159,8 +161,9 @@ export function BoardView({ scope, selectedId, onSelect }) {
     children: [
       jsx(SectionTitle, {
         right: jsx('span', { className: 'tabular-nums text-(--ui-text-quaternary)', children: plural(todoCount, 'todo') }),
-        children: 'Board'
+        children: 'Cartography'
       }),
+      jsx(BatteryBadge, { battery: planBattery.data, label: 'Plan battery' }),
       objective
         ? jsxs('div', {
             className: 'flex flex-col gap-0.5 rounded-[3px] border border-(--ui-stroke-tertiary) px-2 py-1.5',

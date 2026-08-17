@@ -10,6 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { host, useQuery } from '@hermes/plugin-sdk'
 import config from './config.json'
 import { ID, RPC, assertResponseScope, projectSelectorItems, roadmapSelectorItems } from './data.js'
+import { usePersistedState } from './persist.js'
 
 /**
  * Layout mode measured on the REAL container via ResizeObserver
@@ -111,21 +112,97 @@ export function useRoadmapBoard(profile, projectId, roadmapId, enabled) {
 }
 
 /**
+ * Batterie Plan — the plan-validation gate for one version (read-only).
+ */
+export function useRoadmapPlanBattery(profile, projectId, roadmapId, version, enabled) {
+  return useQuery({
+    queryKey: [ID, 'plan-battery', profile, projectId, roadmapId, version],
+    queryFn: async () => host.request(RPC.plans_check, { profile, project_id: projectId, roadmap_id: roadmapId, version }),
+    enabled,
+    refetchInterval: config.query.boardRefetchMs
+  })
+}
+
+/**
+ * Batterie Team — the team gate for one version (read-only).
+ */
+export function useRoadmapTeamBattery(profile, projectId, roadmapId, version, enabled) {
+  return useQuery({
+    queryKey: [ID, 'team-battery', profile, projectId, roadmapId, version],
+    queryFn: async () => host.request(RPC.team_check, { profile, project_id: projectId, roadmap_id: roadmapId, version }),
+    enabled,
+    refetchInterval: config.query.boardRefetchMs
+  })
+}
+
+/**
+ * Batterie Readiness — the readiness gate for one version (read-only).
+ */
+export function useRoadmapReadinessBattery(profile, projectId, roadmapId, version, enabled) {
+  return useQuery({
+    queryKey: [ID, 'readiness-battery', profile, projectId, roadmapId, version],
+    queryFn: async () => host.request(RPC.readiness_check, { profile, project_id: projectId, roadmap_id: roadmapId, version }),
+    enabled,
+    refetchInterval: config.query.boardRefetchMs
+  })
+}
+
+/**
+ * Team — the version's lane workers + todo→worker assignments, plus the
+ * Batterie Team result. Loaded when the scope and active version are known.
+ */
+export function useRoadmapTeam(profile, projectId, roadmapId, version, enabled) {
+  return useQuery({
+    queryKey: [ID, 'team', profile, projectId, roadmapId, version],
+    queryFn: async () => {
+      const [team, battery] = await Promise.all([
+        host.request(RPC.team_list, { profile, project_id: projectId, roadmap_id: roadmapId, version }),
+        host.request(RPC.team_check, { profile, project_id: projectId, roadmap_id: roadmapId, version })
+      ])
+      if (!assertResponseScope(team, { profile, projectId, roadmapId })) {
+        throw Object.assign(new Error('Response out of scope'), { code: 5063 })
+      }
+      return { workers: team.workers ?? [], assignments: team.assignments ?? [], battery: battery ?? { ok: false, failures: [] } }
+    },
+    enabled,
+    refetchInterval: config.query.boardRefetchMs
+  })
+}
+
+/**
+ * Readiness — the version's blockers + authorizations, plus the Batterie
+ * Readiness result.
+ */
+export function useRoadmapReadiness(profile, projectId, roadmapId, version, enabled) {
+  return useQuery({
+    queryKey: [ID, 'readiness', profile, projectId, roadmapId, version],
+    queryFn: async () => {
+      const [rd, battery] = await Promise.all([
+        host.request(RPC.readiness_list, { profile, project_id: projectId, roadmap_id: roadmapId, version }),
+        host.request(RPC.readiness_check, { profile, project_id: projectId, roadmap_id: roadmapId, version })
+      ])
+      if (!assertResponseScope(rd, { profile, projectId, roadmapId })) {
+        throw Object.assign(new Error('Response out of scope'), { code: 5063 })
+      }
+      return { items: rd.items ?? [], battery: battery ?? { ok: false, failures: [] } }
+    },
+    enabled,
+    refetchInterval: config.query.boardRefetchMs
+  })
+}
+
+/**
  * Scope selection state (project / roadmap), with derived option lists.
  * The project dropdown is fed by projects.list (projects param); the
  * roadmap options by roadmaps.list. Selections are kept valid when a list
  * refreshes under them (merge, don't clobber: only clear when the value
  * genuinely disappeared — e.g. the selected project was archived).
  */
-export function useScopeState(projects, roadmaps) {
-  const [projectId, setProjectId] = useState('')
-  const [roadmapId, setRoadmapId] = useState('')
+export function useScopeState(profile, projects, roadmaps) {
+  const [projectId, setProjectId] = usePersistedState(`roadmaps:${profile}:projectId`, '')
 
   // Projects are {id, name, slug, …} records; archived ones are filtered
   // out by projectSelectorItems so the selector only offers live scopes.
-  // Roadmaps likewise: roadmapSelectorItems drops archived roadmaps (the
-  // lifecycle badge in the selector shows draft/proposed/in_progress/
-  // validated on the rest) — consistent with the project selector.
   const projectItems = useMemo(() => projectSelectorItems(projects), [projects])
   const projectIds = useMemo(() => projectItems.map((p) => p.id), [projectItems])
   const projectNameById = useMemo(() => {
@@ -137,15 +214,15 @@ export function useScopeState(projects, roadmaps) {
     () => (projectId === '' ? [] : roadmapSelectorItems(roadmaps, projectId)),
     [roadmaps, projectId]
   )
+  // Unique roadmap, auto-derived from the selected project (spec §1.2) — no
+  // roadmap selector; the roadmap is the project's single plan.
+  const roadmapId = roadmapOptions.length > 0 ? roadmapOptions[0].roadmap_id : ''
 
   useEffect(() => {
     if (projectId !== '' && !projectIds.includes(projectId)) setProjectId('')
   }, [projectIds, projectId])
-  useEffect(() => {
-    if (roadmapId !== '' && !roadmapOptions.some((r) => r.roadmap_id === roadmapId)) setRoadmapId('')
-  }, [roadmapOptions, roadmapId])
 
-  return { projectId, setProjectId, roadmapId, setRoadmapId, projectNameById, projects: projectItems, roadmapOptions }
+  return { projectId, setProjectId, roadmapId, projectNameById, projects: projectItems, roadmapOptions }
 }
 
 /**
